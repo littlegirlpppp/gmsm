@@ -37,11 +37,13 @@ var (
 type PublicKey struct {
 	elliptic.Curve
 	X, Y *big.Int
+	PreComputed *[37][64 * 8]uint64 //precomputation
 }
 
 type PrivateKey struct {
 	PublicKey
 	D *big.Int
+	DInv *big.Int //(1+d)^-1
 }
 
 type sm2Signature struct {
