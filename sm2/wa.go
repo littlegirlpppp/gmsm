@@ -17,32 +17,11 @@ type (
 )
 
 var (
-	p256            p256Curve
 	p256Precomputed *[37][64 * 8]uint64
 	precomputeOnce  sync.Once
 )
-func initP256() {
-	// See FIPS 186-3, section D.2.3
-	p256.CurveParams = &elliptic.CurveParams{Name: "SM2-P-256"}
-	p256.P, _ = new(big.Int).SetString("FFFFFFFEFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000FFFFFFFFFFFFFFFF", 16)
-	p256.N, _ = new(big.Int).SetString("FFFFFFFEFFFFFFFFFFFFFFFFFFFFFFFF7203DF6B21C6052B53BBF40939D54123", 16)
-	p256.B, _ = new(big.Int).SetString("28E9FA9E9D9F5E344D5A9E4BCF6509A7F39789F515AB8F92DDBCBD414D940E93", 16)
-	p256.Gx, _ = new(big.Int).SetString("32C4AE2C1F1981195F9904466A39C9948FE30BBFF2660BE1715A4589334C74C7", 16)
-	p256.Gy, _ = new(big.Int).SetString("BC3736A2F4F6779C59BDCEE36B692153D0A9877CC62A474002DF32E52139F0A0", 16)
-	p256.BitSize = 256
-}
 
-func initAll() {
-	initP256()
-}
-var initonce1 sync.Once
-// P256 returns a Curve which implements sm2 curve.
-//
-// The cryptographic operations are implemented using constant-time algorithms.
-func P256() elliptic.Curve {
-	initonce1.Do(initAll)
-	return p256
-}
+
 //optMethod includes some optimized methods.
 type optMethod interface {
 	// CombinedMult implements fast multiplication S1*g + S2*p (g - generator, p - arbitrary point)
@@ -55,7 +34,7 @@ type optMethod interface {
 
 
 func WA_GenerateKey(rand io.Reader) (*PrivateKey, error) {
-	c := P256()
+	c := P256Sm2()
 
 	k, err := randFieldElement(c, rand)
 	if err != nil {
@@ -74,10 +53,10 @@ func WA_GenerateKey(rand io.Reader) (*PrivateKey, error) {
 	return priv, nil
 }
 func maybeReduceModP(in *big.Int) *big.Int {
-	if in.Cmp(p256.P) < 0 {
+	if in.Cmp(sm2P256.P) < 0 {
 		return in
 	}
-	return new(big.Int).Mod(in, p256.P)
+	return new(big.Int).Mod(in, sm2P256.P)
 }
 // fromBig converts a *big.Int into a format used by this code.
 func fromBig(out []uint64, big *big.Int) {
@@ -247,6 +226,238 @@ func p256Inverse(out, in []uint64) {
 // R×R mod p. See comment in Inverse about how this is used.
 var rr = []uint64{0x0000000200000003, 0x00000002FFFFFFFF, 0x0000000100000001, 0x0000000400000002}
 
+// p256GetScalar endian-swaps the big-endian scalar value from in and writes it
+// to out. If the scalar is equal or greater than the order of the group, it's
+// reduced modulo that order.
+func p256GetScalar(out []uint64, in []byte) {
+	n := new(big.Int).SetBytes(in)
+
+	if n.Cmp(sm2P256.N) >= 0 {
+		n.Mod(n, sm2P256.N)
+	}
+	fromBig(out, n)
+}
+func scalarIsZero(scalar []uint64) int {
+	return uint64IsZero(scalar[0] | scalar[1] | scalar[2] | scalar[3])
+}
+func uint64IsZero(x uint64) int {
+	x = ^x
+	x &= x >> 32
+	x &= x >> 16
+	x &= x >> 8
+	x &= x >> 4
+	x &= x >> 2
+	x &= x >> 1
+	return int(x & 1)
+}
+func initTable() {
+	p256Precomputed = new([37][64 * 8]uint64)
+
+	/*	basePoint := []uint64{
+		0x79e730d418a9143c, 0x75ba95fc5fedb601, 0x79fb732b77622510, 0x18905f76a53755c6,
+		0xddf25357ce95560a, 0x8b4ab8e4ba19e45c, 0xd2e88688dd21f325, 0x8571ff1825885d85,
+		0x0000000000000001, 0xffffffff00000000, 0xffffffffffffffff, 0x00000000fffffffe,
+	}*/
+	basePoint := []uint64{
+		0x61328990F418029E, 0x3E7981EDDCA6C050, 0xD6A1ED99AC24C3C3, 0x91167A5EE1C13B05,
+		0xC1354E593C2D0DDD, 0xC1F5E5788D3295FA, 0x8D4CFB066E2A48F8, 0x63CD65D481D735BD,
+		0x0000000000000001, 0x00000000FFFFFFFF, 0x0000000000000000, 0x0000000100000000,
+	}
+	t1 := make([]uint64, 12)
+	t2 := make([]uint64, 12)
+	copy(t2, basePoint)
+
+	zInv := make([]uint64, 4)
+	zInvSq := make([]uint64, 4)
+	for j := 0; j < 64; j++ {
+		copy(t1, t2)
+		for i := 0; i < 37; i++ {
+			// The window size is 7 so we need to double 7 times.
+			if i != 0 {
+				for k := 0; k < 7; k++ {
+					sm2p256PointDoubleAsm(t1, t1)
+				}
+			}
+			// Convert the point to affine form. (Its values are
+			// still in Montgomery form however.)
+			p256Inverse(zInv, t1[8:12])
+			sm2p256Sqr(zInvSq, zInv)
+			sm2p256Mul(zInv, zInv, zInvSq)
+
+			sm2p256Mul(t1[:4], t1[:4], zInvSq)
+			sm2p256Mul(t1[4:8], t1[4:8], zInv)
+
+			copy(t1[8:12], basePoint[8:12])
+			// Update the table entry
+			copy(p256Precomputed[i][j*8:], t1[:8])
+		}
+		if j == 0 {
+			sm2p256PointDoubleAsm(t2, basePoint)
+		} else {
+			sm2p256PointAddAsm(t2, t2, basePoint)
+		}
+	}
+}
+func (p *p256Point) p256BaseMult(scalar []uint64) {
+	precomputeOnce.Do(initTable)
+
+	wvalue := (scalar[0] << 1) & 0xff
+	sel, sign := boothW7(uint(wvalue))
+	sm2p256SelectBase(p.xyz[0:8], p256Precomputed[0][0:], sel)
+	sm2p256NegCond(p.xyz[4:8], sign)
+
+	// (This is one, in the Montgomery domain.)
+	//p.xyz[8] = 0x0000000000000001
+	//p.xyz[9] = 0xffffffff00000000
+	//p.xyz[10] = 0xffffffffffffffff
+	//p.xyz[11] = 0x00000000fffffffe
+	p.xyz[8] = 0x0000000000000001
+	p.xyz[9] = 0x00000000FFFFFFFF
+	p.xyz[10] = 0x0000000000000000
+	p.xyz[11] = 0x0000000100000000
+	var t0 p256Point
+	// (This is one, in the Montgomery domain.)
+	//t0.xyz[8] = 0x0000000000000001
+	//t0.xyz[9] = 0xffffffff00000000
+	//t0.xyz[10] = 0xffffffffffffffff
+	//t0.xyz[11] = 0x00000000fffffffe
+	t0.xyz[8] = 0x0000000000000001
+	t0.xyz[9] = 0x00000000FFFFFFFF
+	t0.xyz[10] = 0x0000000000000000
+	t0.xyz[11] = 0x0000000100000000
+	index := uint(6)
+	zero := sel
+
+	for i := 1; i < 37; i++ {
+		if index < 192 {
+			wvalue = ((scalar[index/64] >> (index % 64)) + (scalar[index/64+1] << (64 - (index % 64)))) & 0xff
+		} else {
+			wvalue = (scalar[index/64] >> (index % 64)) & 0xff
+		}
+		index += 7
+		sel, sign = boothW7(uint(wvalue))
+		sm2p256SelectBase(t0.xyz[0:8], p256Precomputed[i][0:], sel)
+		sm2p256PointAddAffineAsm(p.xyz[0:12], p.xyz[0:12], t0.xyz[0:8], sign, sel, zero)
+		zero |= sel
+	}
+}
+func boothW7(in uint) (int, int) {
+	var s uint = ^((in >> 7) - 1)
+	var d uint = (1 << 8) - in - 1
+	d = (d & s) | (in & (^s))
+	d = (d >> 1) + (d & 1)
+	return int(d), int(s & 1)
+}
+//fast sm2p256Mult with public key table
+func (p *p256Point) p256PreMult(Precomputed *[37][64*8]uint64, scalar []uint64) {
+	wvalue := (scalar[0] << 1) & 0xff
+	sel, sign := boothW7(uint(wvalue))
+	sm2p256SelectBase(p.xyz[0:8], Precomputed[0][0:], sel)
+	sm2p256NegCond(p.xyz[4:8], sign)
+
+	// (This is one, in the Montgomery domain.)
+	//p.xyz[8] = 0x0000000000000001
+	//p.xyz[9] = 0xffffffff00000000
+	//p.xyz[10] = 0xffffffffffffffff
+	//p.xyz[11] = 0x00000000fffffffe
+	p.xyz[8] = 0x0000000000000001
+	p.xyz[9] = 0x00000000FFFFFFFF
+	p.xyz[10] = 0x0000000000000000
+	p.xyz[11] = 0x0000000100000000
+	var t0 p256Point
+	// (This is one, in the Montgomery domain.)
+	//t0.xyz[8] = 0x0000000000000001
+	//t0.xyz[9] = 0xffffffff00000000
+	//t0.xyz[10] = 0xffffffffffffffff
+	//t0.xyz[11] = 0x00000000fffffffe
+	t0.xyz[8] = 0x0000000000000001
+	t0.xyz[9] = 0x00000000FFFFFFFF
+	t0.xyz[10] = 0x0000000000000000
+	t0.xyz[11] = 0x0000000100000000
+	index := uint(6)
+	zero := sel
+
+	for i := 1; i < 37; i++ {
+		if index < 192 {
+			wvalue = ((scalar[index/64] >> (index % 64)) + (scalar[index/64+1] << (64 - (index % 64)))) & 0xff
+		} else {
+			wvalue = (scalar[index/64] >> (index % 64)) & 0xff
+		}
+		index += 7
+		sel, sign = boothW7(uint(wvalue))
+		sm2p256SelectBase(t0.xyz[0:8], Precomputed[i][0:], sel)
+		sm2p256PointAddAffineAsm(p.xyz[0:12], p.xyz[0:12], t0.xyz[0:8], sign, sel, zero)
+		zero |= sel
+	}
+}
+func (p *p256Point) CopyConditional(src *p256Point, v int) {
+	pMask := uint64(v) - 1
+	srcMask := ^pMask
+
+	for i, n := range p.xyz {
+		p.xyz[i] = (n & pMask) | (src.xyz[i] & srcMask)
+	}
+}
+func (curve p256Curve) CombinedMult(Precomputed *[37][64*8]uint64, baseScalar, scalar []byte) (x, y *big.Int) {
+	scalarReversed := make([]uint64, 4)
+	var r1 p256Point
+	r2 := new(p256Point)
+	p256GetScalar(scalarReversed, baseScalar)
+	r1IsInfinity := scalarIsZero(scalarReversed)
+	r1.p256BaseMult(scalarReversed)
+
+	p256GetScalar(scalarReversed, scalar)
+	r2IsInfinity := scalarIsZero(scalarReversed)
+	//fromBig(r2.xyz[0:4], maybeReduceModP(bigX))
+	//fromBig(r2.xyz[4:8], maybeReduceModP(bigY))
+	//sm2p256Mul(r2.xyz[0:4], r2.xyz[0:4], rr[:])
+	//sm2p256Mul(r2.xyz[4:8], r2.xyz[4:8], rr[:])
+	//
+	//// This sets r2's Z value to 1, in the Montgomery domain.
+	////	r2.xyz[8] = 0x0000000000000001
+	////	r2.xyz[9] = 0xffffffff00000000
+	////	r2.xyz[10] = 0xffffffffffffffff
+	////	r2.xyz[11] = 0x00000000fffffffe
+	//r2.xyz[8] = 0x0000000000000001
+	//r2.xyz[9] = 0x00000000FFFFFFFF
+	//r2.xyz[10] = 0x0000000000000000
+	//r2.xyz[11] = 0x0000000100000000
+	//
+	////r2.p256ScalarMult(scalarReversed)
+	////sm2p256PointAddAsm(r1.xyz[:], r1.xyz[:], r2.xyz[:])
+
+	//r2.p256ScalarMult(scalarReversed)
+	r2.p256PreMult(Precomputed,scalarReversed)
+
+	var sum, double p256Point
+	pointsEqual := sm2p256PointAddAsm(sum.xyz[:], r1.xyz[:], r2.xyz[:])
+	sm2p256PointDoubleAsm(double.xyz[:], r1.xyz[:])
+	sum.CopyConditional(&double, pointsEqual)
+	sum.CopyConditional(&r1, r2IsInfinity)
+	sum.CopyConditional(r2, r1IsInfinity)
+	return sum.p256PointToAffine()
+}
+func (p *p256Point) p256PointToAffine() (x, y *big.Int) {
+	zInv := make([]uint64, 4)
+	zInvSq := make([]uint64, 4)
+	p256Inverse(zInv, p.xyz[8:12])
+	sm2p256Sqr(zInvSq, zInv)
+	sm2p256Mul(zInv, zInv, zInvSq)
+
+	sm2p256Mul(zInvSq, p.xyz[0:4], zInvSq)
+	sm2p256Mul(zInv, p.xyz[4:8], zInv)
+
+	sm2p256FromMont(zInvSq, zInvSq)
+	sm2p256FromMont(zInv, zInv)
+
+	xOut := make([]byte, 32)
+	yOut := make([]byte, 32)
+	sm2p256LittleToBig(xOut, zInvSq)
+	sm2p256LittleToBig(yOut, zInv)
+
+	return new(big.Int).SetBytes(xOut), new(big.Int).SetBytes(yOut)
+}
+
 //precompute public key table
 func (curve p256Curve) InitPubKeyTable(x,y *big.Int) (Precomputed *[37][64*8]uint64) {
 	Precomputed = new([37][64 * 8]uint64)
@@ -299,5 +510,14 @@ func (curve p256Curve) InitPubKeyTable(x,y *big.Int) (Precomputed *[37][64*8]uin
 			sm2p256PointAddAsm(t2, t2, basePoint)
 		}
 	}
+	return
+}
+func (curve p256Curve) PreScalarMult(Precomputed *[37][64*8]uint64, scalar []byte) (x,y *big.Int) {
+	scalarReversed := make([]uint64, 4)
+	p256GetScalar(scalarReversed, scalar)
+
+	r := new(p256Point)
+	r.p256PreMult(Precomputed,scalarReversed)
+	x,y = r.p256PointToAffine()
 	return
 }
