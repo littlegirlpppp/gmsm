@@ -35,12 +35,12 @@ func initP256() {
 func initAll() {
 	initP256()
 }
-
+var initonce1 sync.Once
 // P256 returns a Curve which implements sm2 curve.
 //
 // The cryptographic operations are implemented using constant-time algorithms.
 func P256() elliptic.Curve {
-	initonce.Do(initAll)
+	initonce1.Do(initAll)
 	return p256
 }
 //optMethod includes some optimized methods.
