@@ -97,7 +97,7 @@ func NewCipher(key []byte) (cipher.Block, error)
 ## SM2椭圆曲线公钥密码算法 - Public key cryptographic algorithm SM2 based on elliptic curves
 
 - 遵循的SM2标准号为： GM/T 0003.1-2012、GM/T 0003.2-2012、GM/T 0003.3-2012、GM/T 0003.4-2012、GM/T 0003.5-2012、GM/T 0009-2012、GM/T 0010-2012
-- go package： `github.com/littlegirlpppp/tjfoc-gm/sm2`
+- go package： `"github.com/littlegirlpppp/gmsm/sm2"`
 
 ### 代码示例
 

@@ -18,9 +18,9 @@ package gmtls
 
 import (
 	"crypto"
+	ecX509 "crypto/x509"
 	"crypto/ecdsa"
 	"crypto/rsa"
-	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -28,9 +28,8 @@ import (
 	"net"
 	"strings"
 	"time"
-
-	"github.com/littlegirlpppp/tjfoc-gm/sm2"
-	X "github.com/littlegirlpppp/tjfoc-gm/x509"
+	"github.com/littlegirlpppp/gmsm/sm2"
+	"github.com/littlegirlpppp/gmsm/x509"
 )
 
 // Server returns a new TLS server side connection
@@ -255,7 +254,7 @@ func X509KeyPair(certPEMBlock, keyPEMBlock []byte) (Certificate, error) {
 
 	// We don't need to parse the public key for TLS, but we so do anyway
 	// to check that it looks sane and matches the private key.
-	x509Cert, err := X.ParseCertificate(cert.Certificate[0])
+	x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
 		return fail(err)
 	}
@@ -272,7 +271,27 @@ func X509KeyPair(certPEMBlock, keyPEMBlock []byte) (Certificate, error) {
 	case *ecdsa.PublicKey:
 		pub, _ = x509Cert.PublicKey.(*ecdsa.PublicKey)
 		switch pub.Curve {
-		case sm2.P256():
+		case sm2.P256Sm2():
+			priv, ok := cert.PrivateKey.(*sm2.PrivateKey)
+			if !ok {
+				return fail(errors.New("tls: sm2 private key type does not match public key type"))
+			}
+			if pub.X.Cmp(priv.X) != 0 || pub.Y.Cmp(priv.Y) != 0 {
+				return fail(errors.New("tls: sm2 private key does not match public key"))
+			}
+		default:
+			priv, ok := cert.PrivateKey.(*ecdsa.PrivateKey)
+			if !ok {
+				return fail(errors.New("tls: private key type does not match public key type"))
+			}
+			if pub.X.Cmp(priv.X) != 0 || pub.Y.Cmp(priv.Y) != 0 {
+				return fail(errors.New("tls: private key does not match public key"))
+			}
+		}
+	case *sm2.PublicKey:
+		pub, _ = x509Cert.PublicKey.(*sm2.PublicKey)
+		switch pub.Curve {
+		case sm2.P256Sm2():
 			priv, ok := cert.PrivateKey.(*sm2.PrivateKey)
 			if !ok {
 				return fail(errors.New("tls: sm2 private key type does not match public key type"))
@@ -296,10 +315,10 @@ func X509KeyPair(certPEMBlock, keyPEMBlock []byte) (Certificate, error) {
 }
 
 func parsePrivateKey(der []byte) (crypto.PrivateKey, error) {
-	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+	if key, err := ecX509.ParsePKCS1PrivateKey(der); err == nil {
 		return key, nil
 	}
-	if key, err := x509.ParsePKCS8PrivateKey(der); err == nil {
+	if key, err := ecX509.ParsePKCS8PrivateKey(der); err == nil {
 		switch key := key.(type) {
 		case *rsa.PrivateKey, *ecdsa.PrivateKey:
 			return key, nil
@@ -307,8 +326,9 @@ func parsePrivateKey(der []byte) (crypto.PrivateKey, error) {
 			return nil, errors.New("tls: found unknown private key type in PKCS#8 wrapping")
 		}
 	}
-	if key, err := X.ParsePKCS8UnecryptedPrivateKey(der); err == nil {
+	if key, err := x509.ParsePKCS8UnecryptedPrivateKey(der); err == nil {
 		return key, nil
+	} else {
+		return nil, fmt.Errorf("tls: failed to parse private key %v", err)
 	}
-	return nil, errors.New("tls: failed to parse private key")
 }

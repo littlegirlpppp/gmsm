@@ -1,10 +1,10 @@
-module github.com/littlegirlpppp/tjfoc-gm
+module github.com/littlegirlpppp/gmsm
 
 go 1.14
 
 require (
-	golang.org/x/crypto v0.0.0-20200728195943-123391ffb6de
-	golang.org/x/net v0.0.0-20200707034311-ab3426394381
-	golang.org/x/sys v0.0.0-20210104204734-6f8348627aad // indirect
-	google.golang.org/grpc v1.31.0
+	github.com/golang/protobuf v1.3.3
+    golang.org/x/crypto v0.0.0-20201012173705-84dcc777aaee
+    golang.org/x/net v0.0.0-20201010224723-4f7140c49acb
+    google.golang.org/grpc v1.31.0
 )

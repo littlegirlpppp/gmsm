@@ -27,12 +27,14 @@ import (
 	"crypto/sha512"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/pem"
 	"errors"
+	"github.com/littlegirlpppp/gmsm/sm2"
 	"hash"
+	"io/ioutil"
 	"math/big"
+	"os"
 	"reflect"
-
-	"github.com/littlegirlpppp/tjfoc-gm/sm2"
 )
 
 /*
@@ -158,7 +160,7 @@ func ParseSm2PublicKey(der []byte) (*sm2.PublicKey, error) {
 	if !reflect.DeepEqual(pubkey.Algo.Algorithm, oidSM2) {
 		return nil, errors.New("x509: not sm2 elliptic curve")
 	}
-	curve := sm2.P256()
+	curve := sm2.P256Sm2()
 	x, y := elliptic.Unmarshal(curve, pubkey.BitString.Bytes)
 	pub := sm2.PublicKey{
 		Curve: curve,
@@ -172,9 +174,6 @@ func MarshalSm2PublicKey(key *sm2.PublicKey) ([]byte, error) {
 	var r pkixPublicKey
 	var algo pkix.AlgorithmIdentifier
 
-	if(key.Curve.Params()!=sm2.P256().Params()){
-		return nil, errors.New("x509: unsupported elliptic curve")
-	}
 	algo.Algorithm = oidSM2
 	algo.Parameters.Class = 0
 	algo.Parameters.Tag = 6
@@ -191,7 +190,7 @@ func ParseSm2PrivateKey(der []byte) (*sm2.PrivateKey, error) {
 	if _, err := asn1.Unmarshal(der, &privKey); err != nil {
 		return nil, errors.New("x509: failed to parse SM2 private key: " + err.Error())
 	}
-	curve := sm2.P256()
+	curve := sm2.P256Sm2()
 	k := new(big.Int).SetBytes(privKey.PrivateKey)
 	curveOrder := curve.Params().N
 	if k.Cmp(curveOrder) >= 0 {
@@ -280,7 +279,6 @@ func ParsePKCS8EcryptedPrivateKey(der, pwd []byte) (*sm2.PrivateKey, error) {
 
 func ParsePKCS8PrivateKey(der, pwd []byte) (*sm2.PrivateKey, error) {
 	if pwd == nil {
-		
 		return ParsePKCS8UnecryptedPrivateKey(der)
 	}
 	return ParsePKCS8EcryptedPrivateKey(der, pwd)
@@ -370,3 +368,122 @@ func MarshalSm2PrivateKey(key *sm2.PrivateKey, pwd []byte) ([]byte, error) {
 	return MarshalSm2EcryptedPrivateKey(key, pwd)
 }
 
+func ReadPrivateKeyFromMem(data []byte, pwd []byte) (*sm2.PrivateKey, error) {
+	var block *pem.Block
+
+	block, _ = pem.Decode(data)
+	if block == nil {
+		return nil, errors.New("failed to decode private key")
+	}
+	priv, err := ParsePKCS8PrivateKey(block.Bytes, pwd)
+	return priv, err
+}
+
+func ReadPrivateKeyFromPem(FileName string, pwd []byte) (*sm2.PrivateKey, error) {
+	data, err := ioutil.ReadFile(FileName)
+	if err != nil {
+		return nil, err
+	}
+	return ReadPrivateKeyFromMem(data, pwd)
+}
+
+func WritePrivateKeytoMem(key *sm2.PrivateKey, pwd []byte) ([]byte, error) {
+	var block *pem.Block
+
+	der, err := MarshalSm2PrivateKey(key, pwd)
+	if err != nil {
+		return nil, err
+	}
+	if pwd != nil {
+		block = &pem.Block{
+			Type:  "ENCRYPTED PRIVATE KEY",
+			Bytes: der,
+		}
+	} else {
+		block = &pem.Block{
+			Type:  "PRIVATE KEY",
+			Bytes: der,
+		}
+	}
+	return pem.EncodeToMemory(block), nil
+}
+
+func WritePrivateKeytoPem(FileName string, key *sm2.PrivateKey, pwd []byte) (bool, error) {
+	var block *pem.Block
+
+	der, err := MarshalSm2PrivateKey(key, pwd)
+	if err != nil {
+		return false, err
+	}
+	if pwd != nil {
+		block = &pem.Block{
+			Type:  "ENCRYPTED PRIVATE KEY",
+			Bytes: der,
+		}
+	} else {
+		block = &pem.Block{
+			Type:  "PRIVATE KEY",
+			Bytes: der,
+		}
+	}
+	file, err := os.Create(FileName)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	err = pem.Encode(file, block)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func ReadPublicKeyFromMem(data []byte, _ []byte) (*sm2.PublicKey, error) {
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "PUBLIC KEY" {
+		return nil, errors.New("failed to decode public key")
+	}
+	pub, err := ParseSm2PublicKey(block.Bytes)
+	return pub, err
+}
+
+func ReadPublicKeyFromPem(FileName string, pwd []byte) (*sm2.PublicKey, error) {
+	data, err := ioutil.ReadFile(FileName)
+	if err != nil {
+		return nil, err
+	}
+	return ReadPublicKeyFromMem(data, pwd)
+}
+
+func WritePublicKeytoMem(key *sm2.PublicKey, _ []byte) ([]byte, error) {
+	der, err := MarshalSm2PublicKey(key)
+	if err != nil {
+		return nil, err
+	}
+	block := &pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: der,
+	}
+	return pem.EncodeToMemory(block), nil
+}
+
+func WritePublicKeytoPem(FileName string, key *sm2.PublicKey, _ []byte) (bool, error) {
+	der, err := MarshalSm2PublicKey(key)
+	if err != nil {
+		return false, err
+	}
+	block := &pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: der,
+	}
+	file, err := os.Create(FileName)
+	defer file.Close()
+	if err != nil {
+		return false, err
+	}
+	err = pem.Encode(file, block)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}

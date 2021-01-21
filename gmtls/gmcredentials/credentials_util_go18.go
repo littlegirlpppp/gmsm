@@ -15,7 +15,7 @@ limitations under the License.
 
 package gmcredentials
 
-import gmtls "github.com/littlegirlpppp/tjfoc-gm/gmtls"
+import "github.com/littlegirlpppp/gmsm/gmtls"
 
 // cloneTLSConfig returns a shallow clone of the exported
 // fields of cfg, ignoring the unexported sync.Once, which
