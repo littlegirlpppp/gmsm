@@ -200,7 +200,7 @@ func (hs *clientHandshakeStateGM) doFullHandshake() error {
 			}
 
 			pubKey, _ := cert.PublicKey.(*ecdsa.PublicKey)
-			if pubKey.Curve != sm2.P256Sm2() {
+			if pubKey.Curve != sm2.P256() {
 				c.sendAlert(alertUnsupportedCertificate)
 				return fmt.Errorf("tls: pubkey type of cert is error, expect sm2.publicKey")
 			}
@@ -635,7 +635,7 @@ findCert:
 
 			if x509Cert.PublicKeyAlgorithm == x509.ECDSA {
 				pubKey, ok := x509Cert.PublicKey.(*ecdsa.PublicKey)
-				if ok && pubKey.Curve == sm2.P256Sm2(){
+				if ok && pubKey.Curve == sm2.P256(){
 					isGMCert = true
 				}
 			}

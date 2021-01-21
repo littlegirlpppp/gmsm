@@ -158,7 +158,7 @@ func ParseSm2PublicKey(der []byte) (*sm2.PublicKey, error) {
 	if !reflect.DeepEqual(pubkey.Algo.Algorithm, oidSM2) {
 		return nil, errors.New("x509: not sm2 elliptic curve")
 	}
-	curve := sm2.P256Sm2()
+	curve := sm2.P256()
 	x, y := elliptic.Unmarshal(curve, pubkey.BitString.Bytes)
 	pub := sm2.PublicKey{
 		Curve: curve,
@@ -172,7 +172,7 @@ func MarshalSm2PublicKey(key *sm2.PublicKey) ([]byte, error) {
 	var r pkixPublicKey
 	var algo pkix.AlgorithmIdentifier
 
-	if(key.Curve.Params()!=sm2.P256Sm2().Params()){
+	if(key.Curve.Params()!=sm2.P256().Params()){
 		return nil, errors.New("x509: unsupported elliptic curve")
 	}
 	algo.Algorithm = oidSM2
@@ -191,7 +191,7 @@ func ParseSm2PrivateKey(der []byte) (*sm2.PrivateKey, error) {
 	if _, err := asn1.Unmarshal(der, &privKey); err != nil {
 		return nil, errors.New("x509: failed to parse SM2 private key: " + err.Error())
 	}
-	curve := sm2.P256Sm2()
+	curve := sm2.P256()
 	k := new(big.Int).SetBytes(privKey.PrivateKey)
 	curveOrder := curve.Params().N
 	if k.Cmp(curveOrder) >= 0 {

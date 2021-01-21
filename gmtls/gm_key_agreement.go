@@ -224,7 +224,7 @@ func (ka *ecdheKeyAgreementGM) processServerKeyExchange(config *Config, clientHe
 	}
 
 	//according to GMT0024, we don't care about
-	curve := sm2.P256Sm2()
+	curve := sm2.P256()
 	ka.x, ka.y = elliptic.Unmarshal(curve, publicKey) // Unmarshal also checks whether the given point is on the curve
 	if ka.x == nil {
 		return errServerKeyExchange
@@ -379,7 +379,7 @@ func (ka *eccKeyAgreementGM) processServerKeyExchange(config *Config, clientHell
 
 	//verify
 	pubKey, _ := cert.PublicKey.(*ecdsa.PublicKey)
-	if pubKey.Curve != sm2.P256Sm2() {
+	if pubKey.Curve != sm2.P256() {
 		return errors.New("tls: sm2 signing requires a sm2 public key")
 	}
 
@@ -429,7 +429,7 @@ func (ka *eccKeyAgreementGM) generateClientKeyExchange(config *Config, clientHel
 	}
 	pubKey := ka.encipherCert.PublicKey.(*ecdsa.PublicKey)
 	sm2PubKey := &sm2.PublicKey{Curve: pubKey.Curve, X: pubKey.X, Y: pubKey.Y}
-	encrypted, err := sm2.Encrypt(sm2PubKey, preMasterSecret, config.rand())
+	encrypted, err := sm2.Encrypt( config.rand(),sm2PubKey, preMasterSecret)
 	if err != nil {
 		return nil, nil, err
 	}

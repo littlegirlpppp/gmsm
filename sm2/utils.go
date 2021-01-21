@@ -2,55 +2,40 @@ package sm2
 
 import (
 	"encoding/asn1"
+	"errors"
 	"math/big"
 )
 
-func Decompress(a []byte) *PublicKey {
-	var aa, xx, xx3 sm2P256FieldElement
-
-	P256Sm2()
-	x := new(big.Int).SetBytes(a[1:])
-	curve := sm2P256
-	xx = sm2P256FromBig(x)
-	xx3 = sm2P256Square(xx)      // x3 = x ^ 2
-	xx3 = sm2P256Mul(xx3, xx)    // x3 = x ^ 2 * x
-	aa = sm2P256Mul(curve.a, xx) // a = a * x
-	xx3 = sm2P256Add(xx3, aa)
-	xx3 = sm2P256Add(xx3, curve.b)
-
-	y2 := sm2P256ToBig(xx3)
-	y := new(big.Int).ModSqrt(y2, sm2P256.P)
-	if getLastBit(y)+2 != uint(a[0]) {
-		y.Sub(sm2P256.P, y)
-	}
-	return &PublicKey{
-		Curve: P256Sm2(),
-		X:     x,
-		Y:     y,
-	}
+type sm2PrivateKey struct {
+	Version       int
+	PrivateKey    []byte
+	NamedCurveOID asn1.ObjectIdentifier `asn1:"optional,explicit,tag:0"`
+	PublicKey     asn1.BitString        `asn1:"optional,explicit,tag:1"`
 }
 
-func Compress(a *PublicKey) []byte {
-	buf := []byte{}
-	yp := getLastBit(a.Y)
-	buf = append(buf, a.X.Bytes()...)
-	if n := len(a.X.Bytes()); n < 32 {
-		buf = append(zeroByteSlice()[:(32-n)], buf...)
+func ParseSm2PrivateKey(der []byte) (*PrivateKey, error) {
+	var privKey sm2PrivateKey
+
+	if _, err := asn1.Unmarshal(der, &privKey); err != nil {
+		return nil, errors.New("x509: failed to parse SM2 private key: " + err.Error())
 	}
-	buf = append([]byte{byte(yp + 2)}, buf...)
-	return buf
-}
-
-func SignDigitToSignData(r, s *big.Int) ([]byte, error) {
-	return asn1.Marshal(sm2Signature{r, s})
-}
-
-func SignDataToSignDigit(sign []byte) (*big.Int, *big.Int, error) {
-	var sm2Sign sm2Signature
-
-	_, err := asn1.Unmarshal(sign, &sm2Sign)
-	if err != nil {
-		return nil, nil, err
+	curve := P256()
+	k := new(big.Int).SetBytes(privKey.PrivateKey)
+	curveOrder := curve.Params().N
+	if k.Cmp(curveOrder) >= 0 {
+		return nil, errors.New("x509: invalid elliptic curve private key value")
 	}
-	return sm2Sign.R, sm2Sign.S, nil
+	priv := new(PrivateKey)
+	priv.Curve = curve
+	priv.D = k
+	privateKey := make([]byte, (curveOrder.BitLen()+7)/8)
+	for len(privKey.PrivateKey) > len(privateKey) {
+		if privKey.PrivateKey[0] != 0 {
+			return nil, errors.New("x509: invalid private key length")
+		}
+		privKey.PrivateKey = privKey.PrivateKey[1:]
+	}
+	copy(privateKey[len(privateKey)-len(privKey.PrivateKey):], privKey.PrivateKey)
+	priv.X, priv.Y = curve.ScalarBaseMult(privateKey)
+	return priv, nil
 }

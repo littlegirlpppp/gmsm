@@ -272,7 +272,7 @@ func X509KeyPair(certPEMBlock, keyPEMBlock []byte) (Certificate, error) {
 	case *ecdsa.PublicKey:
 		pub, _ = x509Cert.PublicKey.(*ecdsa.PublicKey)
 		switch pub.Curve {
-		case sm2.P256Sm2():
+		case sm2.P256():
 			priv, ok := cert.PrivateKey.(*sm2.PrivateKey)
 			if !ok {
 				return fail(errors.New("tls: sm2 private key type does not match public key type"))

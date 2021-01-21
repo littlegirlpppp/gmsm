@@ -100,7 +100,7 @@ func verifyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hashFunc c
 		if ecdsaSig.R.Sign() <= 0 || ecdsaSig.S.Sign() <= 0 {
 			return errors.New("tls: ECDSA signature contained zero or negative values")
 		}
-		if pubKey.Curve == sm2.P256Sm2() {
+		if pubKey.Curve == sm2.P256() {
 			sm2Public := sm2.PublicKey{
 				Curve: pubKey.Curve,
 				X:     pubKey.X,
