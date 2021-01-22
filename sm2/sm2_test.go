@@ -31,7 +31,7 @@ import (
 )
 
 func TestSm2(t *testing.T) {
-	priv, err := GenerateKey() // 生成密钥对
+	priv, err := GenerateKey(nil) // 生成密钥对
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestSm2(t *testing.T) {
 func BenchmarkSM2(t *testing.B) {
 	t.ReportAllocs()
 	for i := 0; i < t.N; i++ {
-		priv, err := GenerateKey() // 生成密钥对
+		priv, err := GenerateKey(nil) // 生成密钥对
 		if err != nil {
 			log.Fatal(err)
 		}
