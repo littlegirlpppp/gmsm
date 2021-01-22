@@ -20,11 +20,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/subtle"
-	"encoding/asn1"
 	"errors"
 	"fmt"
 	"io"
-	"github.com/littlegirlpppp/gmsm/sm2"
+
 	"github.com/littlegirlpppp/gmsm/x509"
 )
 
@@ -52,7 +51,7 @@ type serverHandshakeState struct {
 func (c *Conn) serverHandshake() error {
 	// If this is the first server handshake, we generate a random key to
 	// encrypt the tickets with.
-	c.config.serverInitOnce.Do(c.config.serverInit)
+	c.config.serverInitOnce.Do(func() { c.config.serverInit(nil) })
 
 	hs := serverHandshakeState{
 		c: c,
@@ -115,8 +114,6 @@ func (c *Conn) serverHandshake() error {
 			return err
 		}
 	}
-	c.handshakeComplete = true
-
 	return nil
 }
 
@@ -141,11 +138,7 @@ func (hs *serverHandshakeState) readClientHello() (isResume bool, err error) {
 			c.sendAlert(alertInternalError)
 			return false, err
 		} else if newConfig != nil {
-			newConfig.mutex.Lock()
-			newConfig.originalConfig = c.config
-			newConfig.mutex.Unlock()
-
-			newConfig.serverInitOnce.Do(newConfig.serverInit)
+			newConfig.serverInitOnce.Do(func() { newConfig.serverInit(c.config) })
 			c.config = newConfig
 		}
 	}
@@ -244,8 +237,6 @@ Curves:
 			hs.ecdsaOk = true
 		case *rsa.PublicKey:
 			hs.rsaSignOk = true
-		case *sm2.PublicKey:
-			hs.ecdsaOk = true
 		default:
 			c.sendAlert(alertInternalError)
 			return false, fmt.Errorf("tls: unsupported signing key type (%T)", priv.Public())
@@ -415,7 +406,7 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 	}
 
 	keyAgreement := hs.suite.ka(c.vers)
-	skx, err := keyAgreement.generateServerKeyExchange(c.config, hs.cert, hs.clientHello, hs.hello)
+	skx, err := keyAgreement.generateServerKeyExchange(c.config, hs.cert,hs.cert, hs.clientHello, hs.hello)
 	if err != nil {
 		c.sendAlert(alertHandshakeFailure)
 		return err
@@ -436,7 +427,7 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 		}
 		if c.vers >= VersionTLS12 {
 			certReq.hasSignatureAndHash = true
-			certReq.signatureAndHashes = supportedSignatureAlgorithms
+			certReq.supportedSignatureAlgorithms = supportedSignatureAlgorithms
 		}
 
 		// An empty list of certificateAuthorities signals to
@@ -537,67 +528,15 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 		}
 
 		// Determine the signature type.
-		var signatureAndHash signatureAndHash
-		if certVerify.hasSignatureAndHash {
-			signatureAndHash = certVerify.signatureAndHash
-			if !isSupportedSignatureAndHash(signatureAndHash, supportedSignatureAlgorithms) {
-				return errors.New("tls: unsupported hash function for client certificate")
-			}
-		} else {
-			// Before TLS 1.2 the signature algorithm was implicit
-			// from the key type, and only one hash per signature
-			// algorithm was possible. Leave the hash as zero.
-			switch pub.(type) {
-			case *ecdsa.PublicKey:
-				signatureAndHash.signature = signatureECDSA
-			case *rsa.PublicKey:
-				signatureAndHash.signature = signatureRSA
-			}
+		_, sigType, hashFunc, err := pickSignatureAlgorithm(pub, []SignatureScheme{certVerify.signatureAlgorithm}, supportedSignatureAlgorithms, c.vers)
+		if err != nil {
+			c.sendAlert(alertIllegalParameter)
+			return err
 		}
 
-		switch key := pub.(type) {
-		case *ecdsa.PublicKey:
-			if signatureAndHash.signature != signatureECDSA {
-				err = errors.New("tls: bad signature type for client's ECDSA certificate")
-				break
-			}
-			ecdsaSig := new(ecdsaSignature)
-			if _, err = asn1.Unmarshal(certVerify.signature, ecdsaSig); err != nil {
-				break
-			}
-			if ecdsaSig.R.Sign() <= 0 || ecdsaSig.S.Sign() <= 0 {
-				err = errors.New("tls: ECDSA signature contained zero or negative values")
-				break
-			}
-			var digest []byte
-			if digest, _, err = hs.finishedHash.hashForClientCertificate(signatureAndHash, hs.masterSecret); err != nil {
-				break
-			}
-			switch key.Curve {
-			case sm2.P256Sm2():
-				if !sm2.Verify(&sm2.PublicKey{
-					X:     key.X,
-					Y:     key.Y,
-					Curve: key.Curve,
-				}, digest, ecdsaSig.R, ecdsaSig.S) {
-					err = errors.New("tls: SM2 verification failure")
-				}
-			default:
-				if !ecdsa.Verify(key, digest, ecdsaSig.R, ecdsaSig.S) {
-					err = errors.New("tls: ECDSA verification failure")
-				}
-			}
-		case *rsa.PublicKey:
-			if signatureAndHash.signature != signatureRSA {
-				err = errors.New("tls: bad signature type for client's RSA certificate")
-				break
-			}
-			var digest []byte
-			var hashFunc crypto.Hash
-			if digest, hashFunc, err = hs.finishedHash.hashForClientCertificate(signatureAndHash, hs.masterSecret); err != nil {
-				break
-			}
-			err = rsa.VerifyPKCS1v15(key, hashFunc, digest, certVerify.signature)
+		var digest []byte
+		if digest, err = hs.finishedHash.hashForClientCertificate(sigType, hashFunc, hs.masterSecret); err == nil {
+			err = verifyHandshakeSignature(sigType, pub, hashFunc, digest, certVerify.signature)
 		}
 		if err != nil {
 			c.sendAlert(alertBadCertificate)
@@ -779,7 +718,7 @@ func (hs *serverHandshakeState) processCertsFromClient(certificates [][]byte) (c
 
 	var pub crypto.PublicKey
 	switch key := certs[0].PublicKey.(type) {
-	case *ecdsa.PublicKey, *rsa.PublicKey, *sm2.PublicKey:
+	case *ecdsa.PublicKey, *rsa.PublicKey:
 		pub = key
 	default:
 		c.sendAlert(alertUnsupportedCertificate)
@@ -847,17 +786,12 @@ func (hs *serverHandshakeState) clientHelloInfo() *ClientHelloInfo {
 		supportedVersions = suppVersArray[VersionTLS12-hs.clientHello.vers:]
 	}
 
-	signatureSchemes := make([]SignatureScheme, 0, len(hs.clientHello.signatureAndHashes))
-	for _, sah := range hs.clientHello.signatureAndHashes {
-		signatureSchemes = append(signatureSchemes, SignatureScheme(sah.hash)<<8+SignatureScheme(sah.signature))
-	}
-
 	hs.cachedClientHelloInfo = &ClientHelloInfo{
 		CipherSuites:      hs.clientHello.cipherSuites,
 		ServerName:        hs.clientHello.serverName,
 		SupportedCurves:   hs.clientHello.supportedCurves,
 		SupportedPoints:   hs.clientHello.supportedPoints,
-		SignatureSchemes:  signatureSchemes,
+		SignatureSchemes:  hs.clientHello.supportedSignatureAlgorithms,
 		SupportedProtos:   hs.clientHello.alpnProtocols,
 		SupportedVersions: supportedVersions,
 		Conn:              hs.c.conn,
