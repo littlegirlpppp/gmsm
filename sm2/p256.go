@@ -1174,3 +1174,54 @@ func sm2P256Scalar8(in sm2P256FieldElement) sm2P256FieldElement {
 
 	return sm2P256ReduceCarry(in, carry)	
 }
+
+
+
+func (curve sm2P256Curve) PreScalarMult(Precomputed *PCom, scalar []byte) (x,y *big.Int) {
+	scalarReversed := make([]uint64, 4)
+	p256GetScalar(scalarReversed, scalar)
+
+	r := new(p256Point)
+	r.p256PreMult(Precomputed,scalarReversed)
+	x,y = r.p256PointToAffine()
+	return
+}
+func (curve sm2P256Curve) CombinedMult(Precomputed *PCom, baseScalar, scalar []byte) (x, y *big.Int) {
+	scalarReversed := make([]uint64, 4)
+	var r1 p256Point
+	r2 := new(p256Point)
+	p256GetScalar(scalarReversed, baseScalar)
+	r1IsInfinity := scalarIsZero(scalarReversed)
+	r1.p256BaseMult(scalarReversed)
+
+	p256GetScalar(scalarReversed, scalar)
+	r2IsInfinity := scalarIsZero(scalarReversed)
+	//fromBig(r2.xyz[0:4], maybeReduceModP(bigX))
+	//fromBig(r2.xyz[4:8], maybeReduceModP(bigY))
+	//sm2p256Mul(r2.xyz[0:4], r2.xyz[0:4], rr[:])
+	//sm2p256Mul(r2.xyz[4:8], r2.xyz[4:8], rr[:])
+	//
+	//// This sets r2's Z value to 1, in the Montgomery domain.
+	////	r2.xyz[8] = 0x0000000000000001
+	////	r2.xyz[9] = 0xffffffff00000000
+	////	r2.xyz[10] = 0xffffffffffffffff
+	////	r2.xyz[11] = 0x00000000fffffffe
+	//r2.xyz[8] = 0x0000000000000001
+	//r2.xyz[9] = 0x00000000FFFFFFFF
+	//r2.xyz[10] = 0x0000000000000000
+	//r2.xyz[11] = 0x0000000100000000
+	//
+	////r2.p256ScalarMult(scalarReversed)
+	////sm2p256PointAddAsm(r1.xyz[:], r1.xyz[:], r2.xyz[:])
+
+	//r2.p256ScalarMult(scalarReversed)
+	r2.p256PreMult(Precomputed,scalarReversed)
+
+	var sum, double p256Point
+	pointsEqual := sm2p256PointAddAsm(sum.xyz[:], r1.xyz[:], r2.xyz[:])
+	sm2p256PointDoubleAsm(double.xyz[:], r1.xyz[:])
+	sum.CopyConditional(&double, pointsEqual)
+	sum.CopyConditional(&r1, r2IsInfinity)
+	sum.CopyConditional(r2, r1IsInfinity)
+	return sum.p256PointToAffine()
+}

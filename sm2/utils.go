@@ -1,7 +1,9 @@
 package sm2
 
 import (
+	"crypto/elliptic"
 	"encoding/asn1"
+	"io"
 	"math/big"
 )
 
@@ -53,4 +55,19 @@ func SignDataToSignDigit(sign []byte) (*big.Int, *big.Int, error) {
 		return nil, nil, err
 	}
 	return sm2Sign.R, sm2Sign.S, nil
+}
+
+var generateRandK = _generateRandK
+func _generateRandK(rand io.Reader, c elliptic.Curve) (k *big.Int) {
+	params := c.Params()
+	b := make([]byte, params.BitSize/8+8)
+	_, err := io.ReadFull(rand, b)
+	if err != nil {
+		return
+	}
+	k = new(big.Int).SetBytes(b)
+	n := new(big.Int).Sub(params.N, one)
+	k.Mod(k, n)
+	k.Add(k, one)
+	return
 }

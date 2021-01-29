@@ -24,6 +24,9 @@ import (
 	"encoding/asn1"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	lru "github.com/hashicorp/golang-lru"
+	"github.com/status-im/keycard-go/hexutils"
 	"io"
 	"math/big"
 
@@ -34,15 +37,34 @@ var (
 	default_uid = []byte{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38}
 )
 
+var PreComputedCached *lru.Cache
+type PCom [37][64 * 8]uint64 // 18944 = 18.5k
+func init() {
+	PreComputedCached, _ = lru.New(len(PCom{})*1024) // 18.50MB
+}
+
+
+
 type PublicKey struct {
 	elliptic.Curve
 	X, Y *big.Int
+	PreComputed *PCom //preComputation
 }
 
 type PrivateKey struct {
 	PublicKey
 	D *big.Int
+	DInv *big.Int //(1+d)^-1
 }
+type optMethod interface {
+	// CombinedMult implements fast multiplication S1*g + S2*p (g - generator, p - arbitrary point)
+	CombinedMult(Precomputed *PCom, baseScalar, scalar []byte) (x, y *big.Int)
+	// InitPubKeyTable implements precomputed table of public key
+	//InitPubKeyTable(x, y *big.Int) (Precomputed *[37][64 * 8]uint64)
+	// PreScalarMult implements fast multiplication of public key
+	PreScalarMult(Precomputed *PCom, scalar []byte) (x, y *big.Int)
+}
+
 
 type sm2Signature struct {
 	R, S *big.Int
@@ -122,44 +144,79 @@ func KeyExchangeA(klen int, ida, idb []byte, priA *PrivateKey, pubB *PublicKey, 
 //****************************************************************************//
 
 func Sm2Sign(priv *PrivateKey, msg, uid []byte, random io.Reader) (r, s *big.Int, err error) {
-	digest, err := priv.PublicKey.Sm3Digest(msg, uid)
-	if err != nil {
-		return nil, nil, err
-	}
-	e := new(big.Int).SetBytes(digest)
-	c := priv.PublicKey.Curve
-	N := c.Params().N
-	if N.Sign() == 0 {
-		return nil, nil, errZeroParam
-	}
-	var k *big.Int
-	for { // 调整算法细节以实现SM2
-		for {
-			k, err = randFieldElement(c, random)
-			if err != nil {
-				r = nil
-				return
-			}
-			r, _ = priv.Curve.ScalarBaseMult(k.Bytes())
-			r.Add(r, e)
-			r.Mod(r, N)
-			if r.Sign() != 0 {
-				if t := new(big.Int).Add(r, k); t.Cmp(N) != 0 {
-					break
-				}
-			}
+	var one = new(big.Int).SetInt64(1)
+	//if len(hash) < 32 {
+	//	err = errors.New("The length of hash has short than what SM2 need.")
+	//	return
+	//}
 
-		}
-		rD := new(big.Int).Mul(priv.D, r)
-		s = new(big.Int).Sub(k, rD)
-		d1 := new(big.Int).Add(priv.D, one)
-		d1Inv := new(big.Int).ModInverse(d1, N)
-		s.Mul(s, d1Inv)
-		s.Mod(s, N)
-		if s.Sign() != 0 {
-			break
-		}
+	var m = make([]byte, 32+len(msg))
+	copy(m, getZ(&priv.PublicKey))
+	copy(m[32:], msg)
+
+	hash := sm3.Sm3Sum(m)
+	e := new(big.Int).SetBytes(hash[:])
+	k := generateRandK(random, priv.PublicKey.Curve)
+
+	x1, _ := priv.PublicKey.Curve.ScalarBaseMult(k.Bytes())
+
+	n := priv.PublicKey.Curve.Params().N
+
+	r = new(big.Int).Add(e, x1)
+
+	r.Mod(r, n)
+
+	s1 := new(big.Int).Mul(r, priv.D)
+	s1.Sub(k, s1)
+
+	s2 := new(big.Int)
+	if priv.DInv == nil {
+		s2 = s2.Add(one, priv.D)
+		s2.ModInverse(s2, n)
+	} else {
+		s2 = priv.DInv
 	}
+
+	s = new(big.Int).Mul(s1, s2)
+	s.Mod(s, n)
+	//digest, err := priv.PublicKey.Sm3Digest(msg, uid)
+	//if err != nil {
+	//	return nil, nil, err
+	//}
+	//e := new(big.Int).SetBytes(digest)
+	//c := priv.PublicKey.Curve
+	//N := c.Params().N
+	//if N.Sign() == 0 {
+	//	return nil, nil, errZeroParam
+	//}
+	//var k *big.Int
+	//for { // 调整算法细节以实现SM2
+	//	for {
+	//		k, err = randFieldElement(c, random)
+	//		if err != nil {
+	//			r = nil
+	//			return
+	//		}
+	//		r, _ = priv.Curve.ScalarBaseMult(k.Bytes())
+	//		r.Add(r, e)
+	//		r.Mod(r, N)
+	//		if r.Sign() != 0 {
+	//			if t := new(big.Int).Add(r, k); t.Cmp(N) != 0 {
+	//				break
+	//			}
+	//		}
+	//
+	//	}
+	//	rD := new(big.Int).Mul(priv.D, r)
+	//	s = new(big.Int).Sub(k, rD)
+	//	d1 := new(big.Int).Add(priv.D, one)
+	//	d1Inv := new(big.Int).ModInverse(d1, N)
+	//	s.Mul(s, d1Inv)
+	//	s.Mod(s, N)
+	//	if s.Sign() != 0 {
+	//		break
+	//	}
+	//}
 	return
 }
 func Sm2Verify(pub *PublicKey, msg, uid []byte, r, s *big.Int) bool {
@@ -189,14 +246,27 @@ func Sm2Verify(pub *PublicKey, msg, uid []byte, r, s *big.Int) bool {
 		return false
 	}
 	var x *big.Int
-	x1, y1 := c.ScalarBaseMult(s.Bytes())
-	x2, y2 := c.ScalarMult(pub.X, pub.Y, t.Bytes())
-	x, _ = c.Add(x1, y1, x2, y2)
-
-	x.Add(x, e)
-	x.Mod(x, N)
-	return x.Cmp(r) == 0
+	key := hexutils.BytesToHex(append(pub.X.Bytes(), pub.Y.Bytes()...))
+	opt, _ := c.(optMethod)
+	if pub.PreComputed != nil {
+		x, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
+	} else {
+		// 由于交易的公钥是临时恢复的,所以验签会直接执行以下流程
+		if val, ok := PreComputedCached.Get(key); ok {
+			pub.PreComputed = val.(*PCom)
+			x, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
+		} else {
+			pub.PreComputed = InitPubKeyTable(pub.X, pub.Y)
+			// 缓存计算过程
+			PreComputedCached.Add(key, pub.PreComputed)
+			x, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
+		}
+	}
+	x1 := new(big.Int).Add(e, x)
+	x1 = x1.Mod(x1, N)
+	return  x1.Cmp(r)==0
 }
+
 
 /*
     za, err := ZA(pub, uid)
@@ -206,7 +276,7 @@ func Sm2Verify(pub *PublicKey, msg, uid []byte, r, s *big.Int) bool {
 	e, err := msgHash(za, msg)
 	hash=e.getBytes()
 */
-func Verify(pub *PublicKey, hash []byte, r, s *big.Int) bool {
+func Verify(pub *PublicKey, msg []byte, r, s *big.Int) bool {
 	c := pub.Curve
 	N := c.Params().N
 
@@ -217,21 +287,43 @@ func Verify(pub *PublicKey, hash []byte, r, s *big.Int) bool {
 		return false
 	}
 
-	// 调整算法细节以实现SM2
+	n := c.Params().N
+
+	var m = make([]byte, 32+len(msg))
+	copy(m, getZ(pub))
+	copy(m[32:], msg)
+	//h := sm3.New()
+	//hash := h.Sum(m)
+	hash := sm3.Sm3Sum(m)
+	e := new(big.Int).SetBytes(hash[:])
+
 	t := new(big.Int).Add(r, s)
-	t.Mod(t, N)
-	if t.Sign() == 0 {
-		return false
+
+	// Check if implements S1*g + S2*p
+	//Using fast multiplication CombinedMult.
+	var x1 *big.Int
+	key := hexutils.BytesToHex(append(pub.X.Bytes(), pub.Y.Bytes()...))
+	opt, _ := c.(optMethod)
+	if pub.PreComputed != nil {
+		x1, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
+	} else {
+		// 由于交易的公钥是临时恢复的,所以验签会直接执行以下流程
+		if val, ok := PreComputedCached.Get(key); ok {
+			fmt.Println("缓存命中缓存命中缓存命中缓存命中缓存命中缓存命中缓存命中缓存命中缓存命中缓存命中缓存命中缓存命中")
+			pub.PreComputed = val.(*PCom)
+			x1, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
+		} else {
+			pub.PreComputed = InitPubKeyTable(pub.X, pub.Y)
+			// 缓存计算过程
+			PreComputedCached.Add(key, pub.PreComputed)
+			x1, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
+		}
 	}
 
-	var x *big.Int
-	x1, y1 := c.ScalarBaseMult(s.Bytes())
-	x2, y2 := c.ScalarMult(pub.X, pub.Y, t.Bytes())
-	x, _ = c.Add(x1, y1, x2, y2)
 
-	e := new(big.Int).SetBytes(hash)
-	x.Add(x, e)
-	x.Mod(x, N)
+	x := new(big.Int).Add(e, x1)
+	x = x.Mod(x, n)
+
 	return x.Cmp(r) == 0
 }
 
@@ -605,6 +697,15 @@ func GenerateKey(random io.Reader) (*PrivateKey, error) {
 	priv.PublicKey.Curve = c
 	priv.D = k
 	priv.PublicKey.X, priv.PublicKey.Y = c.ScalarBaseMult(k.Bytes())
+	priv.DInv = new(big.Int).Add(k, one)
+	priv.DInv.ModInverse(priv.DInv, c.Params().N)
+	// 如果对象c实现了optMethod则执行InitPubKeyTable方法
+	if _, ok := c.(optMethod); ok {
+		//fmt.Printf("GenerateKey opt.InitPubKeyTable====X:%x, Y:%x\n", priv.PublicKey.X, priv.PublicKey.Y)
+		priv.PreComputed = InitPubKeyTable(priv.PublicKey.X, priv.PublicKey.Y)
+		key := hexutils.BytesToHex(append(priv.PublicKey.X.Bytes(), priv.PublicKey.Y.Bytes()...))
+		PreComputedCached.Add(key, priv.PreComputed)
+	}
 
 	return priv, nil
 }
