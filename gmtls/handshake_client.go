@@ -1,17 +1,6 @@
-/*
-Copyright Suzhou Tongji Fintech Research Institute 2017 All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
 package gmtls
 
@@ -23,13 +12,12 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"github.com/littlegirlpppp/gmsm/x509"
 	"io"
 	"net"
 	"strconv"
 	"strings"
 	"sync/atomic"
-
-	"github.com/littlegirlpppp/gmsm/x509"
 )
 
 type clientHandshakeState struct {
@@ -115,10 +103,10 @@ func (c *Conn) clientHandshake() error {
 
 	var hello *clientHelloMsg
 	var err error
-	if c.config.GMSupport != nil {
+	if c.config.GMSupport != nil{
 		c.vers = VersionGMSSL
 		hello, err = makeClientHelloGM(c.config)
-	} else {
+	}else{
 		hello, err = makeClientHello(c.config)
 	}
 	if err != nil {
@@ -150,7 +138,7 @@ func (c *Conn) clientHandshake() error {
 		candidateSession, ok := sessionCache.Get(cacheKey)
 		if ok {
 			// Check that the ciphersuite/version used for the
-			// previous session are still valid.
+		// previous session are still valid.
 			cipherSuiteOk := false
 			for _, id := range hello.cipherSuites {
 				if id == candidateSession.cipherSuite {
@@ -178,7 +166,8 @@ func (c *Conn) clientHandshake() error {
 		}
 	}
 
-	if c.config.GMSupport != nil {
+
+	if c.config.GMSupport != nil{
 		hs := &clientHandshakeStateGM{
 			c:       c,
 			hello:   hello,
@@ -192,7 +181,7 @@ func (c *Conn) clientHandshake() error {
 		if sessionCache != nil && hs.session != nil && session != hs.session {
 			sessionCache.Put(cacheKey, hs.session)
 		}
-	} else {
+	}else{
 		hs := &clientHandshakeState{
 			c:       c,
 			hello:   hello,

@@ -1,36 +1,28 @@
-/*
-Copyright Suzhou Tongji Fintech Research Institute 2017 All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
-// add sm2 support
+// package gmtls partially implements TLS 1.2, as specified in RFC 5246.
 package gmtls
+
+// BUG(agl): The crypto/tls package only implements some countermeasures
+// against Lucky13 attacks on CBC-mode encryption, and only on SHA1
+// variants. See http://www.isg.rhul.ac.uk/tls/TLStiming.pdf and
+// https://www.imperialviolet.org/2013/02/04/luckythirteen.html.
 
 import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rsa"
-	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/littlegirlpppp/gmsm/sm2"
+	"github.com/littlegirlpppp/gmsm/x509"
 	"io/ioutil"
 	"net"
 	"strings"
 	"time"
-
-	"github.com/littlegirlpppp/gmsm/sm2"
-	X "github.com/littlegirlpppp/gmsm/x509"
 )
 
 // Server returns a new TLS server side connection
@@ -111,8 +103,7 @@ func DialWithDialer(dialer *net.Dialer, network, addr string, config *Config) (*
 	timeout := dialer.Timeout
 
 	if !dialer.Deadline.IsZero() {
-		//		deadlineTimeout := time.Until(dialer.Deadline)
-		deadlineTimeout := dialer.Deadline.Sub(time.Now()) // support go before 1.8
+		deadlineTimeout := time.Until(dialer.Deadline)
 		if timeout == 0 || deadlineTimeout < timeout {
 			timeout = deadlineTimeout
 		}
@@ -247,15 +238,14 @@ func X509KeyPair(certPEMBlock, keyPEMBlock []byte) (Certificate, error) {
 		skippedBlockTypes = append(skippedBlockTypes, keyDERBlock.Type)
 	}
 
-	var err error
-	cert.PrivateKey, err = parsePrivateKey(keyDERBlock.Bytes)
+	// We don't need to parse the public key for TLS, but we so do anyway
+	// to check that it looks sane and matches the private key.
+	x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
 		return fail(err)
 	}
 
-	// We don't need to parse the public key for TLS, but we so do anyway
-	// to check that it looks sane and matches the private key.
-	x509Cert, err := X.ParseCertificate(cert.Certificate[0])
+	cert.PrivateKey, err = parsePrivateKey(keyDERBlock.Bytes)
 	if err != nil {
 		return fail(err)
 	}
@@ -270,45 +260,46 @@ func X509KeyPair(certPEMBlock, keyPEMBlock []byte) (Certificate, error) {
 			return fail(errors.New("tls: private key does not match public key"))
 		}
 	case *ecdsa.PublicKey:
-		pub, _ = x509Cert.PublicKey.(*ecdsa.PublicKey)
-		switch pub.Curve {
-		case sm2.P256Sm2():
-			priv, ok := cert.PrivateKey.(*sm2.PrivateKey)
-			if !ok {
-				return fail(errors.New("tls: sm2 private key type does not match public key type"))
-			}
-			if pub.X.Cmp(priv.X) != 0 || pub.Y.Cmp(priv.Y) != 0 {
-				return fail(errors.New("tls: sm2 private key does not match public key"))
-			}
-		default:
-			priv, ok := cert.PrivateKey.(*ecdsa.PrivateKey)
-			if !ok {
-				return fail(errors.New("tls: private key type does not match public key type"))
-			}
-			if pub.X.Cmp(priv.X) != 0 || pub.Y.Cmp(priv.Y) != 0 {
-				return fail(errors.New("tls: private key does not match public key"))
-			}
+		priv, ok := cert.PrivateKey.(*ecdsa.PrivateKey)
+		if !ok {
+			return fail(errors.New("tls: ecdsa private key type does not match public key type"))
+		}
+		if pub.X.Cmp(priv.X) != 0 || pub.Y.Cmp(priv.Y) != 0 {
+			return fail(errors.New("tls: ecdsa private key does not match public key"))
+		}
+	case *sm2.PublicKey:
+		priv, ok := cert.PrivateKey.(*sm2.PrivateKey)
+		if !ok {
+			return fail(errors.New("tls: sm2 private key type does not match public key type"))
+		}
+		if pub.X.Cmp(priv.X) != 0 || pub.Y.Cmp(priv.Y) != 0 {
+			return fail(errors.New("tls: sm2 private key does not match public key"))
 		}
 	default:
 		return fail(errors.New("tls: unknown public key algorithm"))
 	}
+
 	return cert, nil
 }
 
+// Attempt to parse the given private key DER block. OpenSSL 0.9.8 generates
+// PKCS#1 private keys by default, while OpenSSL 1.0.0 generates PKCS#8 keys.
+// OpenSSL ecparam generates SEC1 EC private keys for ECDSA. We try all three.
 func parsePrivateKey(der []byte) (crypto.PrivateKey, error) {
 	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
 		return key, nil
 	}
 	if key, err := x509.ParsePKCS8PrivateKey(der); err == nil {
 		switch key := key.(type) {
-		case *rsa.PrivateKey, *ecdsa.PrivateKey:
+		case *rsa.PrivateKey, *ecdsa.PrivateKey, *sm2.PrivateKey:
 			return key, nil
 		default:
 			return nil, errors.New("tls: found unknown private key type in PKCS#8 wrapping")
 		}
 	}
-	if key, err := X.ParsePKCS8UnecryptedPrivateKey(der); err == nil {
+	if key, err := x509.ParseECPrivateKey(der); err == nil {
 		return key, nil
 	}
+
 	return nil, errors.New("tls: failed to parse private key")
 }

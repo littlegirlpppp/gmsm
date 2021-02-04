@@ -1,17 +1,6 @@
-/*
-Copyright Suzhou Tongji Fintech Research Institute 2017 All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
 package gmtls
 
@@ -50,7 +39,8 @@ const (
 	alertUserCanceled           alert = 90
 	alertNoRenegotiation        alert = 100
 	alertNoApplicationProtocol  alert = 120
-	//GMT0024
+
+	// specific types for GMT0024
 	alertUnspporttedSite2Site   alert = 200
 	alertNoArea                 alert = 201
 	alertUnspportedAreaType     alert = 202
@@ -84,7 +74,8 @@ var alertText = map[alert]string{
 	alertUserCanceled:           "user canceled",
 	alertNoRenegotiation:        "no renegotiation",
 	alertNoApplicationProtocol:  "no application protocol",
-	//GMT0024
+
+	//specific types for GM
 	alertUnspporttedSite2Site:   "不支持site2site",
 	alertNoArea              :   "没有保护域",
 	alertUnspportedAreaType  :   "不支持的保护域类型",

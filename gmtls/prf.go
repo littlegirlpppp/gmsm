@@ -1,17 +1,6 @@
-/*
-Copyright Suzhou Tongji Fintech Research Institute 2017 All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
 package gmtls
 
@@ -47,12 +36,8 @@ func pHash(result, secret, seed []byte, hash func() hash.Hash) {
 		h.Write(a)
 		h.Write(seed)
 		b := h.Sum(nil)
-		todo := len(b)
-		if j+todo > len(result) {
-			todo = len(result) - j
-		}
-		copy(result[j:j+todo], b)
-		j += todo
+		copy(result[j:], b)
+		j += len(b)
 
 		h.Reset()
 		h.Write(a)
@@ -134,10 +119,6 @@ var keyExpansionLabel = []byte("key expansion")
 var clientFinishedLabel = []byte("client finished")
 var serverFinishedLabel = []byte("server finished")
 
-func prfAndHashForGM() func(result, secret, label, seed []byte) {
-	return prf12(sm3.New)
-}
-
 func prfAndHashForVersion(version uint16, suite *cipherSuite) (func(result, secret, label, seed []byte), crypto.Hash) {
 	switch version {
 	case VersionSSL30:
@@ -149,23 +130,20 @@ func prfAndHashForVersion(version uint16, suite *cipherSuite) (func(result, secr
 			return prf12(sha512.New384), crypto.SHA384
 		}
 		return prf12(sha256.New), crypto.SHA256
+	case VersionGMSSL:
+		return prf12(sm3.New), 0
 	default:
 		panic("unknown version")
 	}
 }
 
 func prfForVersion(version uint16, suite *cipherSuite) func(result, secret, label, seed []byte) {
-	var prf func(result, secret, label, seed []byte)
-	if version == VersionGMSSL {
-		prf = prfAndHashForGM()
-	} else {
-		prf, _ = prfAndHashForVersion(version, suite)
-	}
+	prf, _ := prfAndHashForVersion(version, suite)
 	return prf
 }
 
 // masterFromPreMasterSecret generates the master secret from the pre-master
-// secret. See http://tools.ietf.org/html/rfc5246#section-8.1
+// secret. See https://tools.ietf.org/html/rfc5246#section-8.1
 func masterFromPreMasterSecret(version uint16, suite *cipherSuite, preMasterSecret, clientRandom, serverRandom []byte) []byte {
 	seed := make([]byte, 0, len(clientRandom)+len(serverRandom))
 	seed = append(seed, clientRandom...)
@@ -202,7 +180,7 @@ func keysFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, clie
 }
 
 // lookupTLSHash looks up the corresponding crypto.Hash for a given
-// TLS hash identifier.
+// hash from a TLS SignatureScheme.
 func lookupTLSHash(signatureAlgorithm SignatureScheme) (crypto.Hash, error) {
 	switch signatureAlgorithm {
 	case PKCS1WithSHA1, ECDSAWithSHA1:
@@ -217,22 +195,16 @@ func lookupTLSHash(signatureAlgorithm SignatureScheme) (crypto.Hash, error) {
 		return 0, fmt.Errorf("tls: unsupported signature algorithm: %#04x", signatureAlgorithm)
 	}
 }
+
 func newFinishedHash(version uint16, cipherSuite *cipherSuite) finishedHash {
 	var buffer []byte
 	if version == VersionSSL30 || version >= VersionTLS12 {
 		buffer = []byte{}
 	}
 
-	var prf func(result, secret, label, seed []byte)
-
-	if version == VersionGMSSL {
-		prf = prfAndHashForGM()
-		return finishedHash{sm3.New(), sm3.New(), nil, nil, buffer, version, prf}
-	} else {
-		prf, hash := prfAndHashForVersion(version, cipherSuite)
-		if hash != 0 {
-			return finishedHash{hash.New(), hash.New(), nil, nil, buffer, version, prf}
-		}
+	prf, hash := prfAndHashForVersion(version, cipherSuite)
+	if hash != 0 {
+		return finishedHash{hash.New(), hash.New(), nil, nil, buffer, version, prf}
 	}
 
 	return finishedHash{sha1.New(), sha1.New(), md5.New(), md5.New(), buffer, version, prf}
@@ -272,7 +244,7 @@ func (h *finishedHash) Write(msg []byte) (n int, err error) {
 }
 
 func (h finishedHash) Sum() []byte {
-	if h.version >= VersionTLS12 || h.version == VersionGMSSL {
+	if h.version >= VersionTLS12 || h.version == VersionGMSSL{
 		return h.client.Sum(nil)
 	}
 
@@ -340,8 +312,8 @@ func (h finishedHash) serverSum(masterSecret []byte) []byte {
 	return out
 }
 
-// hashForClientCertificate returns a digest, hash function, and TLS 1.2 hash
-// id suitable for signing by a TLS client certificate.
+// hashForClientCertificate returns a digest over the handshake messages so far,
+// suitable for signing by a TLS client certificate.
 func (h finishedHash) hashForClientCertificate(sigType uint8, hashAlg crypto.Hash, masterSecret []byte) ([]byte, error) {
 	if (h.version == VersionSSL30 || h.version >= VersionTLS12) && h.buffer == nil {
 		panic("a handshake hash for a client-certificate was requested after discarding the handshake buffer")

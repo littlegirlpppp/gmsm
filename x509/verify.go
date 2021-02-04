@@ -1,17 +1,6 @@
-/*
-Copyright Suzhou Tongji Fintech Research Institute 2017 All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// Copyright 2011 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
 package x509
 
@@ -98,7 +87,7 @@ func (h HostnameError) Error() string {
 			valid += san.String()
 		}
 	} else {
-		if len(c.DNSNames) > 0 {
+		if c.hasSANExtension() {
 			valid = strings.Join(c.DNSNames, ", ")
 		} else {
 			valid = c.Subject.CommonName
@@ -177,7 +166,7 @@ const (
 
 func matchNameConstraint(domain, constraint string) bool {
 	// The meaning of zero length constraints is not specified, but this
-	// code follows NSS and accepts them as valid for everything.
+	// code follows NSS and accepts them as matching everything.
 	if len(constraint) == 0 {
 		return true
 	}
@@ -202,12 +191,17 @@ func matchNameConstraint(domain, constraint string) bool {
 
 // isValid performs validity checks on the c.
 func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *VerifyOptions) error {
+	if len(c.UnhandledCriticalExtensions) > 0 {
+		return UnhandledCriticalExtension{}
+	}
+
 	if len(currentChain) > 0 {
 		child := currentChain[len(currentChain)-1]
 		if !bytes.Equal(child.RawIssuer, c.RawSubject) {
 			return CertificateInvalidError{c, NameMismatch}
 		}
 	}
+
 	now := opts.CurrentTime
 	if now.IsZero() {
 		now = time.Now()
@@ -215,6 +209,7 @@ func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *V
 	if now.Before(c.NotBefore) || now.After(c.NotAfter) {
 		return CertificateInvalidError{c, Expired}
 	}
+
 	if len(c.PermittedDNSDomains) > 0 {
 		ok := false
 		for _, constraint := range c.PermittedDNSDomains {
@@ -225,6 +220,12 @@ func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *V
 		}
 
 		if !ok {
+			return CertificateInvalidError{c, CANotAuthorizedForThisName}
+		}
+	}
+
+	for _, constraint := range c.ExcludedDNSDomains {
+		if matchNameConstraint(opts.DNSName, constraint) {
 			return CertificateInvalidError{c, CANotAuthorizedForThisName}
 		}
 	}
@@ -286,10 +287,6 @@ func (c *Certificate) Verify(opts VerifyOptions) (chains [][]*Certificate, err e
 	// Use Windows's own verification and chain building.
 	if opts.Roots == nil && runtime.GOOS == "windows" {
 		return c.systemVerify(&opts)
-	}
-
-	if len(c.UnhandledCriticalExtensions) > 0 {
-		return nil, UnhandledCriticalExtension{}
 	}
 
 	if opts.Roots == nil {
@@ -491,7 +488,7 @@ func (c *Certificate) VerifyHostname(h string) error {
 
 	lowered := toLowerCaseASCII(h)
 
-	if len(c.DNSNames) > 0 {
+	if c.hasSANExtension() {
 		for _, match := range c.DNSNames {
 			if matchHostnames(toLowerCaseASCII(match), lowered) {
 				return nil

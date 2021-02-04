@@ -1,17 +1,6 @@
-/*
-Copyright Suzhou Tongji Fintech Research Institute 2017 All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
 package gmtls
 
@@ -22,9 +11,9 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"io"
-
 	"github.com/littlegirlpppp/gmsm/x509"
+	"io"
+	"sync/atomic"
 )
 
 // serverHandshakeState contains details of a server handshake in progress.
@@ -47,7 +36,6 @@ type serverHandshakeState struct {
 }
 
 // serverHandshake performs a TLS handshake as a server.
-// c.out.Mutex <= L; c.handshakeMutex <= L.
 func (c *Conn) serverHandshake() error {
 	// If this is the first server handshake, we generate a random key to
 	// encrypt the tickets with.
@@ -58,6 +46,7 @@ func (c *Conn) serverHandshake() error {
 	}
 	isResume, err := hs.readClientHello()
 	if err != nil {
+		fmt.Println("readClientHello error:", err)
 		return err
 	}
 
@@ -114,6 +103,10 @@ func (c *Conn) serverHandshake() error {
 			return err
 		}
 	}
+
+	c.ekm = ekmFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.clientHello.random, hs.hello.random)
+	atomic.StoreUint32(&c.handshakeStatus, 1)
+
 	return nil
 }
 
@@ -406,7 +399,7 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 	}
 
 	keyAgreement := hs.suite.ka(c.vers)
-	skx, err := keyAgreement.generateServerKeyExchange(c.config, hs.cert,hs.cert, hs.clientHello, hs.hello)
+	skx, err := keyAgreement.generateServerKeyExchange(c.config, hs.cert, hs.clientHello, hs.hello)
 	if err != nil {
 		c.sendAlert(alertHandshakeFailure)
 		return err

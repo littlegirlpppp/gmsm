@@ -1,17 +1,6 @@
-/*
-Copyright Suzhou Tongji Fintech Research Institute 2017 All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// Copyright 2017 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
 package gmtls
 
@@ -73,6 +62,7 @@ func pickSignatureAlgorithm(pubkey crypto.PublicKey, peerSigAlgs, ourSigAlgs []S
 			if sigType == signatureECDSA {
 				return sigAlg, sigType, hashAlg, nil
 			}
+
 		case *sm2.PublicKey:
 			if sigType == signatureECDSA {
 				return sigAlg, sigType, hashAlg, nil
@@ -100,16 +90,7 @@ func verifyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hashFunc c
 		if ecdsaSig.R.Sign() <= 0 || ecdsaSig.S.Sign() <= 0 {
 			return errors.New("tls: ECDSA signature contained zero or negative values")
 		}
-		if pubKey.Curve == sm2.P256Sm2() {
-			sm2Public := sm2.PublicKey{
-				Curve: pubKey.Curve,
-				X:     pubKey.X,
-				Y:     pubKey.Y,
-			}
-			if !sm2Public.Verify(digest, sig) {
-				return errors.New("tls: SM2 verification failure")
-			}
-		} else if !ecdsa.Verify(pubKey, digest, ecdsaSig.R, ecdsaSig.S) {
+		if !ecdsa.Verify(pubKey, digest, ecdsaSig.R, ecdsaSig.S) {
 			return errors.New("tls: ECDSA verification failure")
 		}
 	case signaturePKCS1v15:

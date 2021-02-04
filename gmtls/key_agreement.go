@@ -1,17 +1,6 @@
-/*
-Copyright Suzhou Tongji Fintech Research Institute 2017 All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// Copyright 2010 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
 package gmtls
 
@@ -22,12 +11,11 @@ import (
 	"crypto/rsa"
 	"crypto/sha1"
 	"errors"
+	"github.com/littlegirlpppp/gmsm/x509"
 	"io"
 	"math/big"
 
-	"github.com/littlegirlpppp/gmsm/x509"
-
-	"golang.org/x/crypto/curve25519"
+	"golang_org/x/crypto/curve25519"
 )
 
 var errClientKeyExchange = errors.New("tls: invalid ClientKeyExchange message")
@@ -37,8 +25,7 @@ var errServerKeyExchange = errors.New("tls: invalid ServerKeyExchange message")
 // encrypts the pre-master secret to the server's public key.
 type rsaKeyAgreement struct{}
 
-func (ka rsaKeyAgreement) generateServerKeyExchange(config *Config, signCert, cipherCert *Certificate,
-	clientHello *clientHelloMsg, hello *serverHelloMsg) (*serverKeyExchangeMsg, error) {
+func (ka rsaKeyAgreement) generateServerKeyExchange(config *Config, cert *Certificate, clientHello *clientHelloMsg, hello *serverHelloMsg) (*serverKeyExchangeMsg, error) {
 	return nil, nil
 }
 
@@ -170,8 +157,7 @@ type ecdheKeyAgreement struct {
 	x, y *big.Int
 }
 
-func (ka *ecdheKeyAgreement) generateServerKeyExchange(config *Config, signCert, cipherCert *Certificate,
-	clientHello *clientHelloMsg, hello *serverHelloMsg) (*serverKeyExchangeMsg, error) {
+func (ka *ecdheKeyAgreement) generateServerKeyExchange(config *Config, cert *Certificate, clientHello *clientHelloMsg, hello *serverHelloMsg) (*serverKeyExchangeMsg, error) {
 	preferredCurves := config.curvePreferences()
 
 NextCandidate:
@@ -222,7 +208,7 @@ NextCandidate:
 	serverECDHParams[3] = byte(len(ecdhePublic))
 	copy(serverECDHParams[4:], ecdhePublic)
 
-	priv, ok := signCert.PrivateKey.(crypto.Signer)
+	priv, ok := cert.PrivateKey.(crypto.Signer)
 	if !ok {
 		return nil, errors.New("tls: certificate private key does not implement crypto.Signer")
 	}

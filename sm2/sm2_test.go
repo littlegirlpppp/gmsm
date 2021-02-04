@@ -1,212 +1,253 @@
-/*
-Copyright Suzhou Tongji Fintech Research Institute 2017 All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+// Copyright 2011 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
-                 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
+// Package sm2 implements china crypto standards.
 package sm2
 
 import (
 	"bytes"
-	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/gob"
+	"encoding/hex"
 	"fmt"
-	"io/ioutil"
+	"github.com/littlegirlpppp/gmsm/sm3"
+	"io"
 	"math/big"
-	"os"
+	"reflect"
 	"testing"
 )
 
-func TestSm2(t *testing.T) {
-	priv, err := GenerateKey(rand.Reader) // 生成密钥对
-	fmt.Println(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fmt.Printf("%v\n", priv.Curve.IsOnCurve(priv.X, priv.Y)) // 验证是否为sm2的曲线
-	pub := &priv.PublicKey
-	msg := []byte("123456")
-	d0, err := pub.EncryptAsn1(msg, rand.Reader)
-	if err != nil {
-		fmt.Printf("Error: failed to encrypt %s: %v\n", msg, err)
+type Assert struct {}
+
+func (a *Assert)Equal(t *testing.T, expect, actual interface{}) {
+	if reflect.TypeOf(expect) != reflect.TypeOf(actual) {
+		t.Error("assert failed not equal", expect, actual)
 		return
 	}
-	// fmt.Printf("Cipher text = %v\n", d0)
-	d1, err := priv.DecryptAsn1(d0)
-	if err != nil {
-		fmt.Printf("Error: failed to decrypt: %v\n", err)
-	}
-	fmt.Printf("clear text = %s\n", d1)
-
-	msg, _ = ioutil.ReadFile("ifile")             // 从文件读取数据
-	sign, err := priv.Sign(rand.Reader, msg, nil) // 签名
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = ioutil.WriteFile("TestResult", sign, os.FileMode(0644))
-	if err != nil {
-		t.Fatal(err)
-	}
-	signdata, _ := ioutil.ReadFile("TestResult")
-	ok := priv.Verify(msg, signdata) // 密钥验证
-	if ok != true {
-		fmt.Printf("Verify error\n")
+	var buf1 bytes.Buffer
+	enc1 := gob.NewEncoder(&buf1)
+	enc1.Encode(expect)
+	var buf2 bytes.Buffer
+	enc2 := gob.NewEncoder(&buf2)
+	enc2.Encode(expect)
+	if bytes.Equal(buf1.Bytes(),buf2.Bytes()) {
+		t.Log("true")
 	} else {
-		fmt.Printf("Verify ok\n")
+		t.Error("assert failed not equal", expect, actual)
 	}
-	pubKey := priv.PublicKey
-	ok = pubKey.Verify(msg, signdata) // 公钥验证
-	if ok != true {
-		fmt.Printf("Verify error\n")
+}
+func (a *Assert)True(t *testing.T, value bool) {
+	if value == true {
+		t.Log("true")
 	} else {
-		fmt.Printf("Verify ok\n")
+		t.Error("assert failed %i is false", value)
+	}
+}
+var assert Assert
+
+func TestSignVerify(t *testing.T) {
+	msg := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	priv, err := GenerateKey(rand.Reader)
+	if err != nil {
+		panic("GenerateKey failed")
 	}
 
+	hfunc := sm3.New()
+	hfunc.Write(msg)
+	hash := hfunc.Sum(nil)
+
+	r, s, err := Sign(rand.Reader, priv, hash)
+	if err != nil {
+		panic(err)
+	}
+
+	ret := Verify(&priv.PublicKey, hash, r, s)
+	fmt.Println(ret)
 }
 
-func BenchmarkSM2Sign(t *testing.B) {
-	t.ReportAllocs()
-	msg := []byte("test")
-	priv, err := GenerateKey(nil) // 生成密钥对
+func TestBase(t *testing.T) {
+	msg := []byte{1,2,3,4}
+	priv, err := GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatal(err)
+		panic("GenerateKey failed")
 	}
-	t.ResetTimer()
-	for i := 0; i < t.N; i++ {
-		_, err := priv.Sign(nil, msg, nil) // 签名
-		if err != nil {
-			t.Fatal(err)
+	fmt.Printf("D:%s\n" , priv.D.Text(16))
+	fmt.Printf("X:%s\n" , priv.X.Text(16))
+	fmt.Printf("Y:%s\n" , priv.Y.Text(16))
+
+	hfunc := sm3.New()
+	hfunc.Write(msg)
+	hash := hfunc.Sum(nil)
+	fmt.Printf("hash:%02X\n", hash)
+	var done  = make(chan struct{})
+	go func(){
+		for i:=0;;i+=1 {
+			sig, err := priv.Sign(rand.Reader, hash, nil)
+			if err != nil {
+				panic(err)
+			}
+			if len(sig) == 73 {
+				fmt.Println("found it")
+				done <- struct{}{}
+				break
+			}
+			if i%100 == 0 {
+				break
+			}
 		}
+	}()
+
+	r, s, err := Sign(rand.Reader, priv, hash)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("R:%s\n" , r.Text(16))
+	fmt.Printf("S:%s\n" , s.Text(16))
+
+
+	ret := Verify(&priv.PublicKey, hash, r, s)
+	fmt.Println(ret)
+	<-done
+}
+
+
+func TestKeyGeneration(t *testing.T) {
+	priv, err := GenerateKey(rand.Reader)
+	if err != nil {
+		t.Errorf("error: %s", err)
+		return
+	}
+
+	if !priv.PublicKey.Curve.IsOnCurve(priv.PublicKey.X, priv.PublicKey.Y) {
+		t.Errorf("public key invalid: %s", err)
 	}
 }
 
-func BenchmarkSM2Verify(t *testing.B) {
-	t.ReportAllocs()
-	msg := []byte("test")
-	priv, err := GenerateKey(nil) // 生成密钥对
-	if err != nil {
-		t.Fatal(err)
-	}
-	sign, err := priv.Sign(nil, msg, nil) // 签名
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.ResetTimer()
-	for i := 0; i < t.N; i++ {
-		priv.Verify(msg, sign) // 密钥验证
+func BenchmarkSign(b *testing.B) {
+	b.ResetTimer()
+	origin := []byte("testing")
+	hashed  := sm3.SumSM3(origin)
+	priv, _ := GenerateKey(rand.Reader)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _ = Sign(rand.Reader, priv, hashed[:])
 	}
 }
 
-func BenchmarkEcdsaSign(t *testing.B) {
-	t.ReportAllocs()
-	msg := []byte("test")
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+func TestSignAndVerify(t *testing.T) {
+	priv, _ := GenerateKey(rand.Reader)
+
+	origin := []byte("testintestintestintestintestintestinggggggtesting")
+	hash := sm3.New()
+	hash.Write(origin)
+	hashed := hash.Sum(nil)
+	r, s, err := Sign(rand.Reader, priv, hashed)
 	if err != nil {
-		t.Fatal(err)
+		t.Errorf(" error signing: %s", err)
+		return
 	}
-	t.ResetTimer()
-	for i := 0; i < t.N; i++ {
-		_, _, err := ecdsa.Sign(rand.Reader, priv, msg)
-		if err != nil {
-			t.Fatal(err)
-		}
+
+	if !Verify(&priv.PublicKey, hashed, r, s) {
+		t.Errorf(" Verify failed")
+	}
+
+	//hashed[0] ^= 0xff
+	hashed[0] = 0x53
+	for i := 0; i < len(hashed); i++ {
+		hashed[i] = byte(i)
+	}
+	if Verify(&priv.PublicKey, hashed, r, s) {
+		t.Errorf("Verify always works!")
 	}
 }
 
-func BenchmarkEcdsaVerify(t *testing.B) {
-	t.ReportAllocs()
-	msg := []byte("test")
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+func TestKDF(t *testing.T) {
+	x2,err := hex.DecodeString("64D20D27D0632957F8028C1E024F6B02EDF23102A566C932AE8BD613A8E865FE")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("%s", err.Error())
 	}
-	r, s, err := ecdsa.Sign(rand.Reader, priv, msg)
+	y2,err := hex.DecodeString("58D225ECA784AE300A81A2D48281A828E1CEDF11C4219099840265375077BF78")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("%s", err.Error())
 	}
-	t.ResetTimer()
-	for i := 0; i < t.N; i++ {
-		ecdsa.Verify(&priv.PublicKey, msg, r, s)
-	}
+	expect,err := hex.DecodeString("006E30DAE231B071DFAD8AA379E90264491603")
+	klen := 152
+	actual := keyDerivation(append(x2, y2...), klen)
+	assert.Equal(t, expect, actual)
+
 }
 
-func TestKEB2(t *testing.T) {
-	ida := []byte{'1', '2', '3', '4', '5', '6', '7', '8',
-		'1', '2', '3', '4', '5', '6', '7', '8'}
-	idb := []byte{'1', '2', '3', '4', '5', '6', '7', '8',
-		'1', '2', '3', '4', '5', '6', '7', '8'}
-	daBuf := []byte{0x81, 0xEB, 0x26, 0xE9, 0x41, 0xBB, 0x5A, 0xF1,
-		0x6D, 0xF1, 0x16, 0x49, 0x5F, 0x90, 0x69, 0x52,
-		0x72, 0xAE, 0x2C, 0xD6, 0x3D, 0x6C, 0x4A, 0xE1,
-		0x67, 0x84, 0x18, 0xBE, 0x48, 0x23, 0x00, 0x29}
-	dbBuf := []byte{0x78, 0x51, 0x29, 0x91, 0x7D, 0x45, 0xA9, 0xEA,
-		0x54, 0x37, 0xA5, 0x93, 0x56, 0xB8, 0x23, 0x38,
-		0xEA, 0xAD, 0xDA, 0x6C, 0xEB, 0x19, 0x90, 0x88,
-		0xF1, 0x4A, 0xE1, 0x0D, 0xEF, 0xA2, 0x29, 0xB5}
-	raBuf := []byte{0xD4, 0xDE, 0x15, 0x47, 0x4D, 0xB7, 0x4D, 0x06,
-		0x49, 0x1C, 0x44, 0x0D, 0x30, 0x5E, 0x01, 0x24,
-		0x00, 0x99, 0x0F, 0x3E, 0x39, 0x0C, 0x7E, 0x87,
-		0x15, 0x3C, 0x12, 0xDB, 0x2E, 0xA6, 0x0B, 0xB3}
+func TestENC_GMT_EX1(t *testing.T) {
+	p256Sm2ParamsTest := &elliptic.CurveParams{Name: "SM2-P-256-TEST"} // 注明为SM2
+	//SM2椭	椭 圆 曲 线 公 钥 密 码 算 法 推 荐 曲 线 参 数
+	p256Sm2ParamsTest.P, _ = new(big.Int).SetString("8542D69E4C044F18E8B92435BF6FF7DE457283915C45517D722EDB8B08F1DFC3", 16)
+	p256Sm2ParamsTest.N, _ = new(big.Int).SetString("8542D69E4C044F18E8B92435BF6FF7DD297720630485628D5AE74EE7C32E79B7", 16)
+	p256Sm2ParamsTest.B, _ = new(big.Int).SetString("63E4C6D3B23B0C849CF84241484BFE48F61D59A5B16BA06E6E12D1DA27C5249A", 16)
+	p256Sm2ParamsTest.Gx, _ = new(big.Int).SetString("421DEBD61B62EAB6746434EBC3CC315E32220B3BADD50BDC4C4E6C147FEDD43D", 16)
+	p256Sm2ParamsTest.Gy, _ = new(big.Int).SetString("0680512BCBB42C07D47349D2153B70C4E5D7FDFCBFA36EA1A85841B9E46E09A2", 16)
+	p256Sm2ParamsTest.BitSize = 256
 
-	rbBuf := []byte{0x7E, 0x07, 0x12, 0x48, 0x14, 0xB3, 0x09, 0x48,
-		0x91, 0x25, 0xEA, 0xED, 0x10, 0x11, 0x13, 0x16,
-		0x4E, 0xBF, 0x0F, 0x34, 0x58, 0xC5, 0xBD, 0x88,
-		0x33, 0x5C, 0x1F, 0x9D, 0x59, 0x62, 0x43, 0xD6}
+	p256sm2CurveTest := p256Curve{p256Sm2ParamsTest}
 
-	expk := []byte{0x6C, 0x89, 0x34, 0x73, 0x54, 0xDE, 0x24, 0x84,
-		0xC6, 0x0B, 0x4A, 0xB1, 0xFD, 0xE4, 0xC6, 0xE5}
+	generateRandK = func (rand io.Reader, c elliptic.Curve) (k *big.Int) {
+		k,_ =  new(big.Int).SetString("4C62EEFD6ECFC2B95B92FD6C3D9575148AFA17425546D49018E5388D49DD7B4F", 16)
+		return k
+	}
+	expectA,_ := new(big.Int).SetString("787968B4FA32C3FD2417842E73BBFEFF2F3C848B6831D7E0EC65228B3937E498", 16)
+	Gy2 := p256sm2CurveTest.Gy.Mul(p256sm2CurveTest.Gy,p256sm2CurveTest.Gy)
+	gx := new(big.Int).SetBytes(p256sm2CurveTest.Gx.Bytes())
+	Gx2 := gx.Mul(p256sm2CurveTest.Gx,p256sm2CurveTest.Gx)
+	Gx3 := gx.Mul(Gx2,p256sm2CurveTest.Gx)
+	A := Gy2.Sub(Gy2,Gx3)
+	A = A.Sub(A,p256sm2CurveTest.B)
+	A = A.Div(A,p256sm2CurveTest.Gx)
+	assert.Equal(t,expectA.Bytes(), A.Bytes())
 
-	curve := P256Sm2()
-	curve.ScalarBaseMult(daBuf)
-	da := new(PrivateKey)
-	da.PublicKey.Curve = curve
-	da.D = new(big.Int).SetBytes(daBuf)
-	da.PublicKey.X, da.PublicKey.Y = curve.ScalarBaseMult(daBuf)
 
-	db := new(PrivateKey)
-	db.PublicKey.Curve = curve
-	db.D = new(big.Int).SetBytes(dbBuf)
-	db.PublicKey.X, db.PublicKey.Y = curve.ScalarBaseMult(dbBuf)
+	expectX,_ := new(big.Int).SetString("435B39CCA8F3B508C1488AFC67BE491A0F7BA07E581A0E4849A5CF70628A7E0A", 16)
+	expectY,_ := new(big.Int).SetString("75DDBA78F15FEECB4C7895E2C1CDF5FE01DEBB2CDBADF45399CCF77BBA076A42", 16)
+	priv := &PrivateKey{}
+	priv.PublicKey.Curve = p256sm2CurveTest
+	priv.D,_ = new(big.Int).SetString("1649AB77A00637BD5E2EFE283FBF353534AA7F7CB89463F208DDBC2920BB0DA0", 16)
+	priv.PublicKey.X,priv.PublicKey.Y = p256sm2CurveTest.ScalarBaseMult(priv.D.Bytes())
+	assert.True(t,p256sm2CurveTest.IsOnCurve(expectX,expectY))
 
-	ra := new(PrivateKey)
-	ra.PublicKey.Curve = curve
-	ra.D = new(big.Int).SetBytes(raBuf)
-	ra.PublicKey.X, ra.PublicKey.Y = curve.ScalarBaseMult(raBuf)
+	//assert.Equal(t, expectX.Bytes(), priv.PublicKey.X.Bytes())
+	//assert.Equal(t, expectY.Bytes(), priv.PublicKey.Y.Bytes())
+}
 
-	rb := new(PrivateKey)
-	rb.PublicKey.Curve = curve
-	rb.D = new(big.Int).SetBytes(rbBuf)
-	rb.PublicKey.X, rb.PublicKey.Y = curve.ScalarBaseMult(rbBuf)
+func TestCryptoToolCompare(t *testing.T) {
+	generateRandK = func(rand io.Reader, c elliptic.Curve) (k *big.Int) {
+		k,_ = new(big.Int).SetString("88E0271D16363C00D6456E151C095BAD4B75968E708234A9762146711D327FF3", 16)
+		return
+	}
+	priv := &PrivateKey{}
+	priv.PublicKey.Curve = P256Sm2()
+	priv.D,_ = new(big.Int).SetString("88E0271D16363C00D6456E151C095BAD4B75968E708234A9762146711D327FF3", 16)
+	priv.PublicKey.X,priv.PublicKey.Y = priv.PublicKey.ScalarBaseMult(priv.D.Bytes())
 
-	k1, Sb, S2, err := KeyExchangeB(16, ida, idb, db, &da.PublicKey, rb, &ra.PublicKey)
+	msg,_ := hex.DecodeString("88E0271D16363C00D6456E151C095BAD4B75968E708234A9762146711D327FF3")
+	Encrypt(rand.Reader, &priv.PublicKey, msg)
+}
+
+func TestEnc(t *testing.T) {
+	priv, _ := GenerateKey(rand.Reader)
+	var msg = "asdfasdf"
+
+	enc, err := Encrypt(rand.Reader, &priv.PublicKey, []byte(msg))
 	if err != nil {
-		t.Error(err)
+		t.Fatalf("encrypt failed : %s", err.Error())
 	}
-	k2, S1, Sa, err := KeyExchangeA(16, ida, idb, da, &db.PublicKey, ra, &rb.PublicKey)
+	dec,err := Decrypt(enc, priv)
 	if err != nil {
-		t.Error(err)
+		t.Fatalf("dec failed : %s", err.Error())
 	}
-	if bytes.Compare(k1, k2) != 0 {
-		t.Error("key exchange differ")
-	}
-	if bytes.Compare(k1, expk) != 0 {
-		t.Errorf("expected %x, found %x", expk, k1)
-	}
-	if bytes.Compare(S1, Sb) != 0 {
-		t.Error("hash verfication failed")
-	}
-	if bytes.Compare(Sa, S2) != 0 {
-		t.Error("hash verfication failed")
+
+	if !bytes.Equal([]byte(msg), dec){
+		t.Error("enc-dec failed")
 	}
 }

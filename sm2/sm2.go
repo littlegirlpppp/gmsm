@@ -1,47 +1,39 @@
-/*
-Copyright Suzhou Tongji Fintech Research Institute 2017 All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+// Copyright 2011 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
+// Package sm2 implements china crypto standards.
 package sm2
 
-// reference to ecdsa
 import (
-	"bytes"
 	"crypto"
 	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/asn1"
-	"encoding/binary"
 	"errors"
+	"github.com/littlegirlpppp/gmsm/sm3"
 	"io"
 	"math/big"
-
-	"github.com/littlegirlpppp/gmsm/sm3"
 )
 
-var (
-	default_uid = []byte{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38}
-)
+type PublicKey struct {
+	elliptic.Curve
+	X, Y *big.Int
+}
+
+type PrivateKey struct {
+	PublicKey
+	D *big.Int
+}
 
 type sm2Signature struct {
 	R, S *big.Int
 }
-type sm2Cipher struct {
-	XCoordinate *big.Int
-	YCoordinate *big.Int
-	HASH        []byte
-	CipherText  []byte
+
+var generateRandK  = _generateRandK
+
+// combinedMult implements fast multiplication S1*g + S2*p (g - generator, p - arbitrary point)
+type combinedMult interface {
+	CombinedMult(bigX, bigY *big.Int, baseScalar, scalar []byte) (x, y *big.Int)
 }
 
 // The SM2's private key contains the public key
@@ -49,13 +41,16 @@ func (priv *PrivateKey) Public() crypto.PublicKey {
 	return &priv.PublicKey
 }
 
-var errZeroParam = errors.New("zero parameter")
-var one = new(big.Int).SetInt64(1)
-var two = new(big.Int).SetInt64(2)
+func (priv *PrivateKey) Sign(rand io.Reader, msg []byte, opts crypto.SignerOpts) ([]byte, error) {
+	r, s, err := Sign(rand, priv, msg)
+	if err != nil {
+		return nil, err
+	}
+	return asn1.Marshal(sm2Signature{r, s})
+}
 
-// sign format = 30 + len(z) + 02 + len(r) + r + 02 + len(s) + s, z being what follows its size, ie 02+len(r)+r+02+len(s)+s
-func (priv *PrivateKey) Sign(random io.Reader, msg []byte, signer crypto.SignerOpts) ([]byte, error) {
-	r, s, err := Sm2Sign(priv, msg, nil, random)
+func (priv *PrivateKey) SignWithDigest(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	r, s, err := SignWithDigest(rand, priv, digest)
 	if err != nil {
 		return nil, err
 	}
@@ -68,390 +63,24 @@ func (pub *PublicKey) Verify(msg []byte, sign []byte) bool {
 	if err != nil {
 		return false
 	}
-	return Sm2Verify(pub, msg, default_uid, sm2Sign.R, sm2Sign.S)
+	return Verify(pub, msg, sm2Sign.R, sm2Sign.S)
 }
 
-func (pub *PublicKey) Sm3Digest(msg, uid []byte) ([]byte, error) {
-	if len(uid) == 0 {
-		uid = default_uid
-	}
-
-	za, err := ZA(pub, uid)
+func (pub *PublicKey) VerifyWithDigest(digest []byte, sign []byte) bool {
+	var sm2Sign sm2Signature
+	_, err := asn1.Unmarshal(sign, &sm2Sign)
 	if err != nil {
-		return nil, err
+		return false
 	}
-
-	e, err := msgHash(za, msg)
-	if err != nil {
-		return nil, err
-	}
-
-	return e.Bytes(), nil
+	return VerifyWithDigest(pub, digest, sm2Sign.R, sm2Sign.S)
 }
 
-//****************************Encryption algorithm****************************//
-func (pub *PublicKey) EncryptAsn1(data []byte, random io.Reader) ([]byte, error) {
-	return EncryptAsn1(pub, data, random)
-}
+var one = new(big.Int).SetInt64(1)
 
-func (priv *PrivateKey) DecryptAsn1(data []byte) ([]byte, error) {
-	return DecryptAsn1(priv, data)
-}
-
-//**************************Key agreement algorithm**************************//
-// KeyExchangeB 协商第二部，用户B调用， 返回共享密钥k
-func KeyExchangeB(klen int, ida, idb []byte, priB *PrivateKey, pubA *PublicKey, rpri *PrivateKey, rpubA *PublicKey) (k, s1, s2 []byte, err error) {
-	return keyExchange(klen, ida, idb, priB, pubA, rpri, rpubA, false)
-}
-
-// KeyExchangeA 协商第二部，用户A调用，返回共享密钥k
-func KeyExchangeA(klen int, ida, idb []byte, priA *PrivateKey, pubB *PublicKey, rpri *PrivateKey, rpubB *PublicKey) (k, s1, s2 []byte, err error) {
-	return keyExchange(klen, ida, idb, priA, pubB, rpri, rpubB, true)
-}
-
-//****************************************************************************//
-
-
-/*
- * sm2密文结构如下:
- *  x
- *  y
- *  hash
- *  CipherText
- */
-func Encrypt(pub *PublicKey, data []byte, random io.Reader) ([]byte, error) {
-	length := len(data)
-	for {
-		c := []byte{}
-		curve := pub.Curve
-		k, err := randFieldElement(curve, random)
-		if err != nil {
-			return nil, err
-		}
-		x1, y1 := curve.ScalarBaseMult(k.Bytes())
-		x2, y2 := curve.ScalarMult(pub.X, pub.Y, k.Bytes())
-		x1Buf := x1.Bytes()
-		y1Buf := y1.Bytes()
-		x2Buf := x2.Bytes()
-		y2Buf := y2.Bytes()
-		if n := len(x1Buf); n < 32 {
-			x1Buf = append(zeroByteSlice()[:32-n], x1Buf...)
-		}
-		if n := len(y1Buf); n < 32 {
-			y1Buf = append(zeroByteSlice()[:32-n], y1Buf...)
-		}
-		if n := len(x2Buf); n < 32 {
-			x2Buf = append(zeroByteSlice()[:32-n], x2Buf...)
-		}
-		if n := len(y2Buf); n < 32 {
-			y2Buf = append(zeroByteSlice()[:32-n], y2Buf...)
-		}
-		c = append(c, x1Buf...) // x分量
-		c = append(c, y1Buf...) // y分量
-		tm := []byte{}
-		tm = append(tm, x2Buf...)
-		tm = append(tm, data...)
-		tm = append(tm, y2Buf...)
-		h := sm3.Sm3Sum(tm)
-		c = append(c, h...)
-		ct, ok := kdf(length, x2Buf, y2Buf) // 密文
-		if !ok {
-			continue
-		}
-		c = append(c, ct...)
-		for i := 0; i < length; i++ {
-			c[96+i] ^= data[i]
-		}
-		return append([]byte{0x04}, c...), nil
-	}
-}
-
-func Decrypt(priv *PrivateKey, data []byte) ([]byte, error) {
-	data = data[1:]
-	length := len(data) - 96
-	curve := priv.Curve
-	x := new(big.Int).SetBytes(data[:32])
-	y := new(big.Int).SetBytes(data[32:64])
-	x2, y2 := curve.ScalarMult(x, y, priv.D.Bytes())
-	x2Buf := x2.Bytes()
-	y2Buf := y2.Bytes()
-	if n := len(x2Buf); n < 32 {
-		x2Buf = append(zeroByteSlice()[:32-n], x2Buf...)
-	}
-	if n := len(y2Buf); n < 32 {
-		y2Buf = append(zeroByteSlice()[:32-n], y2Buf...)
-	}
-	c, ok := kdf(length, x2Buf, y2Buf)
-	if !ok {
-		return nil, errors.New("Decrypt: failed to decrypt")
-	}
-	for i := 0; i < length; i++ {
-		c[i] ^= data[i+96]
-	}
-	tm := []byte{}
-	tm = append(tm, x2Buf...)
-	tm = append(tm, c...)
-	tm = append(tm, y2Buf...)
-	h := sm3.Sm3Sum(tm)
-	if bytes.Compare(h, data[64:96]) != 0 {
-		return c, errors.New("Decrypt: failed to decrypt")
-	}
-	return c, nil
-}
-
-// keyExchange 为SM2密钥交换算法的第二部和第三步复用部分，协商的双方均调用此函数计算共同的字节串
-// klen: 密钥长度
-// ida, idb: 协商双方的标识，ida为密钥协商算法发起方标识，idb为响应方标识
-// pri: 函数调用者的密钥
-// pub: 对方的公钥
-// rpri: 函数调用者生成的临时SM2密钥
-// rpub: 对方发来的临时SM2公钥
-// thisIsA: 如果是A调用，文档中的协商第三步，设置为true，否则设置为false
-// 返回 k 为klen长度的字节串
-func keyExchange(klen int, ida, idb []byte, pri *PrivateKey, pub *PublicKey, rpri *PrivateKey, rpub *PublicKey, thisISA bool) (k, s1, s2 []byte, err error) {
-	curve := P256Sm2()
-	N := curve.Params().N
-	x2hat := keXHat(rpri.PublicKey.X)
-	x2rb := new(big.Int).Mul(x2hat, rpri.D)
-	tbt := new(big.Int).Add(pri.D, x2rb)
-	tb := new(big.Int).Mod(tbt, N)
-	if !curve.IsOnCurve(rpub.X, rpub.Y) {
-		err = errors.New("Ra not on curve")
-		return
-	}
-	x1hat := keXHat(rpub.X)
-	ramx1, ramy1 := curve.ScalarMult(rpub.X, rpub.Y, x1hat.Bytes())
-	vxt, vyt := curve.Add(pub.X, pub.Y, ramx1, ramy1)
-
-	vx, vy := curve.ScalarMult(vxt, vyt, tb.Bytes())
-	pza := pub
-	if thisISA {
-		pza = &pri.PublicKey
-	}
-	za, err := ZA(pza, ida)
-	if err != nil {
-		return
-	}
-	zero := new(big.Int)
-	if vx.Cmp(zero) == 0 || vy.Cmp(zero) == 0 {
-		err = errors.New("V is infinite")
-	}
-	pzb := pub
-	if !thisISA {
-		pzb = &pri.PublicKey
-	}
-	zb, err := ZA(pzb, idb)
-	k, ok := kdf(klen, vx.Bytes(), vy.Bytes(), za, zb)
-	if !ok {
-		err = errors.New("kdf: zero key")
-		return
-	}
-	h1 := BytesCombine(vx.Bytes(), za, zb, rpub.X.Bytes(), rpub.Y.Bytes(), rpri.X.Bytes(), rpri.Y.Bytes())
-	if !thisISA {
-		h1 = BytesCombine(vx.Bytes(), za, zb, rpri.X.Bytes(), rpri.Y.Bytes(), rpub.X.Bytes(), rpub.Y.Bytes())
-	}
-	hash := sm3.Sm3Sum(h1)
-	h2 := BytesCombine([]byte{0x02}, vy.Bytes(), hash)
-	S1 := sm3.Sm3Sum(h2)
-	h3 := BytesCombine([]byte{0x03}, vy.Bytes(), hash)
-	S2 := sm3.Sm3Sum(h3)
-	return k, S1, S2, nil
-}
-
-func msgHash(za, msg []byte) (*big.Int, error) {
-	e := sm3.New()
-	e.Write(za)
-	e.Write(msg)
-	return new(big.Int).SetBytes(e.Sum(nil)[:32]), nil
-}
-
-// ZA = H256(ENTLA || IDA || a || b || xG || yG || xA || yA)
-func ZA(pub *PublicKey, uid []byte) ([]byte, error) {
-	za := sm3.New()
-	uidLen := len(uid)
-	if uidLen >= 8192 {
-		return []byte{}, errors.New("SM2: uid too large")
-	}
-	Entla := uint16(8 * uidLen)
-	za.Write([]byte{byte((Entla >> 8) & 0xFF)})
-	za.Write([]byte{byte(Entla & 0xFF)})
-	if uidLen > 0 {
-		za.Write(uid)
-	}
-	za.Write(sm2P256ToBig(sm2P256.a).Bytes())
-	za.Write(sm2P256.B.Bytes())
-	za.Write(sm2P256.Gx.Bytes())
-	za.Write(sm2P256.Gy.Bytes())
-
-	xBuf := pub.X.Bytes()
-	yBuf := pub.Y.Bytes()
-	if n := len(xBuf); n < 32 {
-		xBuf = append(zeroByteSlice()[:32-n], xBuf...)
-	}
-	if n := len(yBuf); n < 32 {
-		yBuf = append(zeroByteSlice()[:32-n], yBuf...)
-	}
-	za.Write(xBuf)
-	za.Write(yBuf)
-	return za.Sum(nil)[:32], nil
-}
-
-// 32byte
-func zeroByteSlice() []byte {
-	return []byte{
-		0, 0, 0, 0,
-		0, 0, 0, 0,
-		0, 0, 0, 0,
-		0, 0, 0, 0,
-		0, 0, 0, 0,
-		0, 0, 0, 0,
-		0, 0, 0, 0,
-		0, 0, 0, 0,
-	}
-}
-
-/*
-sm2加密，返回asn.1编码格式的密文内容
-*/
-func EncryptAsn1(pub *PublicKey, data []byte, rand io.Reader) ([]byte, error) {
-	cipher, err := Encrypt(pub, data, rand)
-	if err != nil {
-		return nil, err
-	}
-	return CipherMarshal(cipher)
-}
-
-/*
-sm2解密，解析asn.1编码格式的密文内容
-*/
-func DecryptAsn1(pub *PrivateKey, data []byte) ([]byte, error) {
-	cipher, err := CipherUnmarshal(data)
-	if err != nil {
-		return nil, err
-	}
-	return Decrypt(pub, cipher)
-}
-
-/*
-*sm2密文转asn.1编码格式
-*sm2密文结构如下:
-*  x
-*  y
-*  hash
-*  CipherText
- */
-func CipherMarshal(data []byte) ([]byte, error) {
-	data = data[1:]
-	x := new(big.Int).SetBytes(data[:32])
-	y := new(big.Int).SetBytes(data[32:64])
-	hash := data[64:96]
-	cipherText := data[96:]
-	return asn1.Marshal(sm2Cipher{x, y, hash, cipherText})
-}
-
-/*
-sm2密文asn.1编码格式转C1|C3|C2拼接格式
-*/
-func CipherUnmarshal(data []byte) ([]byte, error) {
-	var cipher sm2Cipher
-	_, err := asn1.Unmarshal(data, &cipher)
-	if err != nil {
-		return nil, err
-	}
-	x := cipher.XCoordinate.Bytes()
-	y := cipher.YCoordinate.Bytes()
-	hash := cipher.HASH
-	if err != nil {
-		return nil, err
-	}
-	cipherText := cipher.CipherText
-	if err != nil {
-		return nil, err
-	}
-	c := []byte{}
-	if n := len(x); n < 32 {
-		x = append(zeroByteSlice()[:32-n], x...)
-	}
-	if n := len(y); n < 32 {
-		y = append(zeroByteSlice()[:32-n], y...)
-	}
-	c = append(c, x...)          // x分量
-	c = append(c, y...)          // y分
-	c = append(c, hash...)       // x分量
-	c = append(c, cipherText...) // y分
-	return append([]byte{0x04}, c...), nil
-}
-
-// keXHat 计算 x = 2^w + (x & (2^w-1))
-// 密钥协商算法辅助函数
-func keXHat(x *big.Int) (xul *big.Int) {
-	buf := x.Bytes()
-	for i := 0; i < len(buf)-16; i++ {
-		buf[i] = 0
-	}
-	if len(buf) >= 16 {
-		c := buf[len(buf)-16]
-		buf[len(buf)-16] = c & 0x7f
-	}
-
-	r := new(big.Int).SetBytes(buf)
-	_2w := new(big.Int).SetBytes([]byte{
-		0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
-	return r.Add(r, _2w)
-}
-
-func BytesCombine(pBytes ...[]byte) []byte {
-	len := len(pBytes)
-	s := make([][]byte, len)
-	for index := 0; index < len; index++ {
-		s[index] = pBytes[index]
-	}
-	sep := []byte("")
-	return bytes.Join(s, sep)
-}
-
-func intToBytes(x int) []byte {
-	var buf = make([]byte, 4)
-
-	binary.BigEndian.PutUint32(buf, uint32(x))
-	return buf
-}
-
-func kdf(length int, x ...[]byte) ([]byte, bool) {
-	var c []byte
-
-	ct := 1
-	h := sm3.New()
-	for i, j := 0, (length+31)/32; i < j; i++ {
-		h.Reset()
-		for _, xx := range x {
-			h.Write(xx)
-		}
-		h.Write(intToBytes(ct))
-		hash := h.Sum(nil)
-		if i+1 == j && length%32 != 0 {
-			c = append(c, hash[:length%32]...)
-		} else {
-			c = append(c, hash...)
-		}
-		ct++
-	}
-	for i := 0; i < length; i++ {
-		if c[i] != 0 {
-			return c, true
-		}
-	}
-	return c, false
-}
-
-func randFieldElement(c elliptic.Curve, random io.Reader) (k *big.Int, err error) {
-	if random == nil {
-		random = rand.Reader //If there is no external trusted random source,please use rand.Reader to instead of it.
-	}
+func randFieldElement(c elliptic.Curve, rand io.Reader) (k *big.Int, err error) {
 	params := c.Params()
 	b := make([]byte, params.BitSize/8+8)
-	_, err = io.ReadFull(random, b)
+	_, err = io.ReadFull(rand, b)
 	if err != nil {
 		return
 	}
@@ -460,6 +89,247 @@ func randFieldElement(c elliptic.Curve, random io.Reader) (k *big.Int, err error
 	k.Mod(k, n)
 	k.Add(k, one)
 	return
+}
+
+func GenerateKey(rand io.Reader) (*PrivateKey, error) {
+	c := P256Sm2()
+	k, err := randFieldElement(c, rand)
+	if err != nil {
+		return nil, err
+	}
+	priv := new(PrivateKey)
+	priv.PublicKey.Curve = c
+	priv.D = k
+	priv.PublicKey.X, priv.PublicKey.Y = c.ScalarBaseMult(k.Bytes())
+	return priv, nil
+}
+
+var errZeroParam = errors.New("zero parameter")
+
+func _generateRandK(rand io.Reader, c elliptic.Curve) (k *big.Int) {
+	params := c.Params()
+	b := make([]byte, params.BitSize/8+8)
+	_, err := io.ReadFull(rand, b)
+	if err != nil {
+		return
+	}
+	k = new(big.Int).SetBytes(b)
+	n := new(big.Int).Sub(params.N, one)
+	k.Mod(k, n)
+	k.Add(k, one)
+	return
+}
+
+func zeroByteSlice() []byte{
+	return []byte{0,0,0,0,
+		0,0,0,0,
+		0,0,0,0,
+		0,0,0,0,
+		0,0,0,0,
+		0,0,0,0,
+		0,0,0,0,
+		0,0,0,0,
+	}
+}
+
+//公钥坐标（横坐标）长度小于32字节时，在前面补0
+func getZById(pub *PublicKey, id []byte) []byte{
+	var lena = uint16(len(id) * 8) //bit len of IDA
+	var ENTLa = []byte{byte(lena>>8), byte(lena)}
+	var z = make([]byte, 0, 1024)
+
+	//判断公钥x,y坐标长度是否小于32字节，若小于则在前面补0
+	xBuf := pub.X.Bytes()
+	yBuf := pub.Y.Bytes()
+	if n := len(xBuf); n < 32 {
+		xBuf = append(zeroByteSlice()[:32-n], xBuf...)
+	}
+
+	if n := len(yBuf); n < 32 {
+		yBuf = append(zeroByteSlice()[:32-n], yBuf...)
+	}
+
+	z = append(z, ENTLa...)
+	z = append(z, id...)
+	z = append(z, SM2PARAM_A.Bytes()...)
+	z = append(z, P256Sm2().Params().B.Bytes()...)
+	z = append(z, P256Sm2().Params().Gx.Bytes()...)
+	z = append(z, P256Sm2().Params().Gy.Bytes()...)
+	z = append(z, xBuf...)
+	z = append(z, yBuf...)
+	return sm3.SumSM3(z)
+}
+//Za = sm3(ENTL||IDa||a||b||Gx||Gy||Xa||Xy)
+func getZ(pub *PublicKey) []byte {
+	return getZById(pub, []byte("1234567812345678"))
+}
+
+func Sign(rand io.Reader, priv *PrivateKey, msg []byte) (r, s *big.Int, err error) {
+	var one = new(big.Int).SetInt64(1)
+	//if len(hash) < 32 {
+	//	err = errors.New("The length of hash has short than what SM2 need.")
+	//	return
+	//}
+
+	var m = make([]byte, 32+len(msg))
+	copy(m, getZ(&priv.PublicKey))
+	copy(m[32:], msg)
+
+	e := new(big.Int).SetBytes(sm3.SumSM3(m))
+	k := generateRandK(rand, priv.PublicKey.Curve)
+
+	x1, _ := priv.PublicKey.Curve.ScalarBaseMult(k.Bytes())
+
+	n := priv.PublicKey.Curve.Params().N
+
+	r = new(big.Int).Add(e, x1)
+
+	r.Mod(r, n)
+
+	s1 := new(big.Int).Mul(r, priv.D)
+	s1.Mod(s1, n)
+	s1.Sub(k, s1)
+	s1.Mod(s1, n)
+
+	s2 := new(big.Int).Add(one, priv.D)
+	s2.Mod(s2, n)
+	s2.ModInverse(s2, n)
+	s = new(big.Int).Mul(s1, s2)
+	s.Mod(s, n)
+
+	return
+}
+
+func SignWithDigest(rand io.Reader,priv *PrivateKey, digest []byte) (r, s *big.Int, err error) {
+	var one = new(big.Int).SetInt64(1)
+	//if len(hash) < 32 {
+	//	err = errors.New("The length of hash has short than what SM2 need.")
+	//	return
+	//}
+
+	e := new(big.Int).SetBytes(digest)
+	k := generateRandK(rand, priv.PublicKey.Curve)
+
+	x1, _ := priv.PublicKey.Curve.ScalarBaseMult(k.Bytes())
+
+	n := priv.PublicKey.Curve.Params().N
+
+	r = new(big.Int).Add(e, x1)
+
+	r.Mod(r, n)
+
+	s1 := new(big.Int).Mul(r, priv.D)
+	s1.Mod(s1, n)
+	s1.Sub(k, s1)
+	s1.Mod(s1, n)
+
+	s2 := new(big.Int).Add(one, priv.D)
+	s2.Mod(s2, n)
+	s2.ModInverse(s2, n)
+	s = new(big.Int).Mul(s1, s2)
+	s.Mod(s, n)
+
+	return
+}
+
+func VerifyById(pub *PublicKey, msg,id []byte, r, s *big.Int) bool {
+	c := pub.Curve
+	N := c.Params().N
+
+	if r.Sign() <= 0 || s.Sign() <= 0 {
+		return false
+	}
+	if r.Cmp(N) >= 0 || s.Cmp(N) >= 0 {
+		return false
+	}
+
+	n := pub.Curve.Params().N
+
+	var m = make([]byte, 32+len(msg))
+	copy(m, getZById(pub, id))
+	copy(m[32:], msg)
+	e := new(big.Int).SetBytes(sm3.SumSM3(m))
+
+	t := new(big.Int).Add(r, s)
+	x11, y11 := pub.Curve.ScalarMult(pub.X, pub.Y, t.Bytes())
+	x12, y12 := pub.Curve.ScalarBaseMult(s.Bytes())
+	x1, _ := pub.Curve.Add(x11, y11, x12, y12)
+	x := new(big.Int).Add(e, x1)
+	x = x.Mod(x, n)
+
+	return x.Cmp(r) == 0
+}
+
+func Verify(pub *PublicKey, msg []byte, r, s *big.Int) bool {
+	c := pub.Curve
+	N := c.Params().N
+
+	if r.Sign() <= 0 || s.Sign() <= 0 {
+		return false
+	}
+	if r.Cmp(N) >= 0 || s.Cmp(N) >= 0 {
+		return false
+	}
+
+	n := pub.Curve.Params().N
+
+	var m = make([]byte, 32+len(msg))
+	copy(m, getZ(pub))
+	copy(m[32:], msg)
+	e := new(big.Int).SetBytes(sm3.SumSM3(m))
+
+	t := new(big.Int).Add(r, s)
+	//x11, y11 := pub.Curve.ScalarMult(pub.X, pub.Y, t.Bytes())
+	//x12, y12 := pub.Curve.ScalarBaseMult(s.Bytes())
+	//x1, _ := pub.Curve.Add(x11, y11, x12, y12)
+
+	// Check if implements S1*g + S2*p
+	//Using fast multiplication CombinedMult.
+	var x1 *big.Int
+	if opt,ok := c.(combinedMult);ok {
+		x1,_ = opt.CombinedMult(pub.X, pub.Y,s.Bytes(),t.Bytes())
+	} else {
+		x11, y11 := c.ScalarMult(pub.X, pub.Y, t.Bytes())
+		x12, y12 := c.ScalarBaseMult(s.Bytes())
+		x1, _ = c.Add(x11, y11, x12, y12)
+	}
+
+	x := new(big.Int).Add(e, x1)
+	x = x.Mod(x, n)
+
+	return x.Cmp(r) == 0
+}
+
+func VerifyWithDigest(pub *PublicKey, digest []byte, r, s *big.Int) bool  {
+	c := pub.Curve
+	N := c.Params().N
+
+	if r.Sign() <= 0 || s.Sign() <= 0 {
+		return false
+	}
+	if r.Cmp(N) >= 0 || s.Cmp(N) >= 0 {
+		return false
+	}
+
+	n := pub.Curve.Params().N
+
+	e := new(big.Int).SetBytes(digest)
+
+	t := new(big.Int).Add(r, s)
+	// Check if implements S1*g + S2*p
+	//Using fast multiplication CombinedMult.
+	var x1 *big.Int
+	if opt, ok := c.(combinedMult); ok {
+		x1, _ = opt.CombinedMult(pub.X, pub.Y, s.Bytes(), t.Bytes())
+	} else {
+		x11, y11 := c.ScalarMult(pub.X, pub.Y, t.Bytes())
+		x12, y12 := c.ScalarBaseMult(s.Bytes())
+		x1, _ = c.Add(x11, y11, x12, y12)
+	}
+	x := new(big.Int).Add(e, x1)
+	x = x.Mod(x, n)
+
+	return x.Cmp(r) == 0
 }
 
 type zr struct {
@@ -474,12 +344,3 @@ func (z *zr) Read(dst []byte) (n int, err error) {
 }
 
 var zeroReader = &zr{}
-
-func getLastBit(a *big.Int) uint {
-	return a.Bit(0)
-}
-
-// crypto.Decrypter
-func (priv *PrivateKey) Decrypt(_ io.Reader, msg []byte, _ crypto.DecrypterOpts) (plaintext []byte, err error) {
-	return Decrypt(priv, msg)
-}

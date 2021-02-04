@@ -1,19 +1,12 @@
-/*
-Copyright Suzhou Tongji Fintech Research Institute 2017 All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
-// crypto/x509 add sm2 support
+// Package x509 parses X.509-encoded keys and certificates.
+//
+// On UNIX systems the environment variables SSL_CERT_FILE and SSL_CERT_DIR
+// can be used to override the system default locations for the SSL certificate
+// file and SSL certificate files directory, respectively.
 package x509
 
 import (
@@ -22,28 +15,24 @@ import (
 	"crypto/dsa"
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/md5"
 	"crypto/rsa"
-	"crypto/sha1"
-	"crypto/sha256"
-	"crypto/sha512"
-	"crypto/x509"
+	_ "crypto/sha1"
+	_ "crypto/sha256"
+	_ "crypto/sha512"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"github.com/littlegirlpppp/gmsm/sm2"
+	"github.com/littlegirlpppp/gmsm/sm3"
 	"hash"
 	"io"
 	"math/big"
 	"net"
+	"reflect"
 	"strconv"
 	"time"
-
-	"github.com/littlegirlpppp/gmsm/sm3"
-	"golang.org/x/crypto/ripemd160"
-	"golang.org/x/crypto/sha3"
 )
 
 // pkixPublicKey reflects a PKIX public key structure. See SubjectPublicKeyInfo
@@ -52,6 +41,8 @@ type pkixPublicKey struct {
 	Algo      pkix.AlgorithmIdentifier
 	BitString asn1.BitString
 }
+
+const SM3 crypto.Hash = 255
 
 // ParsePKIXPublicKey parses a DER encoded public key. These values are
 // typically found in PEM blocks with "BEGIN PUBLIC KEY".
@@ -63,7 +54,6 @@ type pkixPublicKey struct {
 // or *ecdsa.PublicKey.
 func ParsePKIXPublicKey(derBytes []byte) (pub interface{}, err error) {
 	var pki publicKeyInfo
-
 	if rest, err := asn1.Unmarshal(derBytes, &pki); err != nil {
 		return nil, err
 	} else if len(rest) != 0 {
@@ -73,13 +63,31 @@ func ParsePKIXPublicKey(derBytes []byte) (pub interface{}, err error) {
 	if algo == UnknownPublicKeyAlgorithm {
 		return nil, errors.New("x509: unknown public key algorithm")
 	}
+	params, _ := asn1.Marshal(oidNamedCurveP256SM2)
+	if algo == ECDSA && reflect.DeepEqual(params, pki.Algorithm.Parameters.FullBytes) {
+		algo = SM2
+	}
+
 	return parsePublicKey(algo, &pki)
 }
 
 func marshalPublicKey(pub interface{}) (publicKeyBytes []byte, publicKeyAlgorithm pkix.AlgorithmIdentifier, err error) {
 	switch pub := pub.(type) {
+	case *sm2.PublicKey:
+		publicKeyBytes = elliptic.Marshal(pub.Curve, pub.X, pub.Y)
+		oid, ok := oidFromNamedCurve(pub.Curve)
+		if !ok {
+			return nil, pkix.AlgorithmIdentifier{}, errors.New("x509: unsupported elliptic curve")
+		}
+		publicKeyAlgorithm.Algorithm = oidPublicKeySM2
+		var paramBytes []byte
+		paramBytes, err = asn1.Marshal(oid)
+		if err != nil {
+			return
+		}
+		publicKeyAlgorithm.Parameters.FullBytes = paramBytes
 	case *rsa.PublicKey:
-		publicKeyBytes, err = asn1.Marshal(rsaPublicKey{
+		publicKeyBytes, err = asn1.Marshal(pkcs1PublicKey{
 			N: pub.N,
 			E: pub.E,
 		})
@@ -89,9 +97,7 @@ func marshalPublicKey(pub interface{}) (publicKeyBytes []byte, publicKeyAlgorith
 		publicKeyAlgorithm.Algorithm = oidPublicKeyRSA
 		// This is a NULL parameters value which is required by
 		// https://tools.ietf.org/html/rfc3279#section-2.3.1.
-		publicKeyAlgorithm.Parameters = asn1.RawValue{
-			Tag: 5,
-		}
+		publicKeyAlgorithm.Parameters = asn1.NullRawValue
 	case *ecdsa.PublicKey:
 		publicKeyBytes = elliptic.Marshal(pub.Curve, pub.X, pub.Y)
 		oid, ok := oidFromNamedCurve(pub.Curve)
@@ -105,24 +111,12 @@ func marshalPublicKey(pub interface{}) (publicKeyBytes []byte, publicKeyAlgorith
 			return
 		}
 		publicKeyAlgorithm.Parameters.FullBytes = paramBytes
-	case *sm2.PublicKey:
-		publicKeyBytes = elliptic.Marshal(pub.Curve, pub.X, pub.Y)
-		oid, ok := oidFromNamedCurve(pub.Curve)
-		if !ok {
-			return nil, pkix.AlgorithmIdentifier{}, errors.New("x509: unsupported SM2 curve")
-		}
-		publicKeyAlgorithm.Algorithm = oidPublicKeyECDSA
-		var paramBytes []byte
-		paramBytes, err = asn1.Marshal(oid)
-		if err != nil {
-			return
-		}
-		publicKeyAlgorithm.Parameters.FullBytes = paramBytes
 	default:
-		return nil, pkix.AlgorithmIdentifier{}, errors.New("x509: only RSA and ECDSA(SM2) public keys supported")
+		return nil, pkix.AlgorithmIdentifier{}, errors.New("x509: only RSA and ECDSA public keys supported")
 	}
 
 	return publicKeyBytes, publicKeyAlgorithm, nil
+
 }
 
 // MarshalPKIXPublicKey serialises a public key to DER-encoded PKIX format.
@@ -158,7 +152,7 @@ type certificate struct {
 
 type tbsCertificate struct {
 	Raw                asn1.RawContent
-	Version            int `asn1:"optional,explicit,default:0,tag:0"`
+	Version            int              `asn1:"optional,explicit,default:0,tag:0"`
 	SerialNumber       *big.Int
 	SignatureAlgorithm pkix.AlgorithmIdentifier
 	Issuer             asn1.RawValue
@@ -180,6 +174,8 @@ type dsaSignature struct {
 
 type ecdsaSignature dsaSignature
 
+type sm2Signature dsaSignature
+
 type validity struct {
 	NotBefore, NotAfter time.Time
 }
@@ -197,115 +193,10 @@ type authKeyId struct {
 
 type SignatureAlgorithm int
 
-type Hash uint
-
-func init() {
-	RegisterHash(MD4, nil)
-	RegisterHash(MD5, md5.New)
-	RegisterHash(SHA1, sha1.New)
-	RegisterHash(SHA224, sha256.New224)
-	RegisterHash(SHA256, sha256.New)
-	RegisterHash(SHA384, sha512.New384)
-	RegisterHash(SHA512, sha512.New)
-	RegisterHash(MD5SHA1, nil)
-	RegisterHash(RIPEMD160, ripemd160.New)
-	RegisterHash(SHA3_224, sha3.New224)
-	RegisterHash(SHA3_256, sha3.New256)
-	RegisterHash(SHA3_384, sha3.New384)
-	RegisterHash(SHA3_512, sha3.New512)
-	RegisterHash(SHA512_224, sha512.New512_224)
-	RegisterHash(SHA512_256, sha512.New512_256)
-	RegisterHash(SM3, sm3.New)
-}
-
-// HashFunc simply returns the value of h so that Hash implements SignerOpts.
-func (h Hash) HashFunc() crypto.Hash {
-	return crypto.Hash(h)
-}
-
-const (
-	MD4        Hash = 1 + iota // import golang.org/x/crypto/md4
-	MD5                        // import crypto/md5
-	SHA1                       // import crypto/sha1
-	SHA224                     // import crypto/sha256
-	SHA256                     // import crypto/sha256
-	SHA384                     // import crypto/sha512
-	SHA512                     // import crypto/sha512
-	MD5SHA1                    // no implementation; MD5+SHA1 used for TLS RSA
-	RIPEMD160                  // import golang.org/x/crypto/ripemd160
-	SHA3_224                   // import golang.org/x/crypto/sha3
-	SHA3_256                   // import golang.org/x/crypto/sha3
-	SHA3_384                   // import golang.org/x/crypto/sha3
-	SHA3_512                   // import golang.org/x/crypto/sha3
-	SHA512_224                 // import crypto/sha512
-	SHA512_256                 // import crypto/sha512
-	SM3
-	maxHash
-)
-
-var digestSizes = []uint8{
-	MD4:        16,
-	MD5:        16,
-	SHA1:       20,
-	SHA224:     28,
-	SHA256:     32,
-	SHA384:     48,
-	SHA512:     64,
-	SHA512_224: 28,
-	SHA512_256: 32,
-	SHA3_224:   28,
-	SHA3_256:   32,
-	SHA3_384:   48,
-	SHA3_512:   64,
-	MD5SHA1:    36,
-	RIPEMD160:  20,
-	SM3:        32,
-}
-
-// Size returns the length, in bytes, of a digest resulting from the given hash
-// function. It doesn't require that the hash function in question be linked
-// into the program.
-func (h Hash) Size() int {
-	if h > 0 && h < maxHash {
-		return int(digestSizes[h])
-	}
-	panic("crypto: Size of unknown hash function")
-}
-
-var hashes = make([]func() hash.Hash, maxHash)
-
-// New returns a new hash.Hash calculating the given hash function. New panics
-// if the hash function is not linked into the binary.
-func (h Hash) New() hash.Hash {
-	if h > 0 && h < maxHash {
-		f := hashes[h]
-		if f != nil {
-			return f()
-		}
-	}
-	panic("crypto: requested hash function #" + strconv.Itoa(int(h)) + " is unavailable")
-}
-
-// Available reports whether the given hash function is linked into the binary.
-func (h Hash) Available() bool {
-	return h < maxHash && hashes[h] != nil
-}
-
-// RegisterHash registers a function that returns a new instance of the given
-// hash function. This is intended to be called from the init function in
-// packages that implement hash functions.
-func RegisterHash(h Hash, f func() hash.Hash) {
-	if h >= maxHash {
-		panic("crypto: RegisterHash of unknown hash function")
-	}
-	hashes[h] = f
-}
-
 const (
 	UnknownSignatureAlgorithm SignatureAlgorithm = iota
 	MD2WithRSA
 	MD5WithRSA
-	//	SM3WithRSA reserve
 	SHA1WithRSA
 	SHA256WithRSA
 	SHA384WithRSA
@@ -334,10 +225,9 @@ func (algo SignatureAlgorithm) isRSAPSS() bool {
 }
 
 var algoName = [...]string{
-	MD2WithRSA:  "MD2-RSA",
-	MD5WithRSA:  "MD5-RSA",
-	SHA1WithRSA: "SHA1-RSA",
-	//	SM3WithRSA:       "SM3-RSA", reserve
+	MD2WithRSA:       "MD2-RSA",
+	MD5WithRSA:       "MD5-RSA",
+	SHA1WithRSA:      "SHA1-RSA",
 	SHA256WithRSA:    "SHA256-RSA",
 	SHA384WithRSA:    "SHA384-RSA",
 	SHA512WithRSA:    "SHA512-RSA",
@@ -350,7 +240,7 @@ var algoName = [...]string{
 	ECDSAWithSHA256:  "ECDSA-SHA256",
 	ECDSAWithSHA384:  "ECDSA-SHA384",
 	ECDSAWithSHA512:  "ECDSA-SHA512",
-	SM2WithSM3:       "SM2-SM3",
+	SM2WithSM3:       "SM2-tjSM3",
 	SM2WithSHA1:      "SM2-SHA1",
 	SM2WithSHA256:    "SM2-SHA256",
 }
@@ -436,16 +326,10 @@ var (
 	oidSignatureECDSAWithSHA256 = asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2}
 	oidSignatureECDSAWithSHA384 = asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 3}
 	oidSignatureECDSAWithSHA512 = asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 4}
-	oidSignatureSM2WithSM3      = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 501}
-	oidSignatureSM2WithSHA1     = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 502}
-	oidSignatureSM2WithSHA256   = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 503}
-	//	oidSignatureSM3WithRSA      = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 504}
 
-	oidSM3     = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 401, 1}
-	oidSHA256  = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}
-	oidSHA384  = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 2}
-	oidSHA512  = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 3}
-	oidHashSM3 = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 401}
+	oidSHA256 = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}
+	oidSHA384 = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 2}
+	oidSHA512 = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 3}
 
 	oidMGF1 = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 8}
 
@@ -453,34 +337,38 @@ var (
 	// but it's specified by ISO. Microsoft's makecert.exe has been known
 	// to produce certificates with this OID.
 	oidISOSignatureSHA1WithRSA = asn1.ObjectIdentifier{1, 3, 14, 3, 2, 29}
+
+	//oid gm
+	oidSignatureSM2WithSM3    = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 501}
+	oidSignatureSM2WithSHA1   = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 502}
+	oidSignatureSM2WithSHA256 = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 503}
 )
 
 var signatureAlgorithmDetails = []struct {
 	algo       SignatureAlgorithm
 	oid        asn1.ObjectIdentifier
 	pubKeyAlgo PublicKeyAlgorithm
-	hash       Hash
+	hash       crypto.Hash
 }{
-	{MD2WithRSA, oidSignatureMD2WithRSA, RSA, Hash(0) /* no value for MD2 */},
-	{MD5WithRSA, oidSignatureMD5WithRSA, RSA, MD5},
-	{SHA1WithRSA, oidSignatureSHA1WithRSA, RSA, SHA1},
-	{SHA1WithRSA, oidISOSignatureSHA1WithRSA, RSA, SHA1},
-	{SHA256WithRSA, oidSignatureSHA256WithRSA, RSA, SHA256},
-	{SHA384WithRSA, oidSignatureSHA384WithRSA, RSA, SHA384},
-	{SHA512WithRSA, oidSignatureSHA512WithRSA, RSA, SHA512},
-	{SHA256WithRSAPSS, oidSignatureRSAPSS, RSA, SHA256},
-	{SHA384WithRSAPSS, oidSignatureRSAPSS, RSA, SHA384},
-	{SHA512WithRSAPSS, oidSignatureRSAPSS, RSA, SHA512},
-	{DSAWithSHA1, oidSignatureDSAWithSHA1, DSA, SHA1},
-	{DSAWithSHA256, oidSignatureDSAWithSHA256, DSA, SHA256},
-	{ECDSAWithSHA1, oidSignatureECDSAWithSHA1, ECDSA, SHA1},
-	{ECDSAWithSHA256, oidSignatureECDSAWithSHA256, ECDSA, SHA256},
-	{ECDSAWithSHA384, oidSignatureECDSAWithSHA384, ECDSA, SHA384},
-	{ECDSAWithSHA512, oidSignatureECDSAWithSHA512, ECDSA, SHA512},
-	{SM2WithSM3, oidSignatureSM2WithSM3, ECDSA, SM3},
-	{SM2WithSHA1, oidSignatureSM2WithSHA1, ECDSA, SHA1},
-	{SM2WithSHA256, oidSignatureSM2WithSHA256, ECDSA, SHA256},
-	//	{SM3WithRSA, oidSignatureSM3WithRSA, RSA, SM3},
+	{MD2WithRSA, oidSignatureMD2WithRSA, RSA, crypto.Hash(0) /* no value for MD2 */ },
+	{MD5WithRSA, oidSignatureMD5WithRSA, RSA, crypto.MD5},
+	{SHA1WithRSA, oidSignatureSHA1WithRSA, RSA, crypto.SHA1},
+	{SHA1WithRSA, oidISOSignatureSHA1WithRSA, RSA, crypto.SHA1},
+	{SHA256WithRSA, oidSignatureSHA256WithRSA, RSA, crypto.SHA256},
+	{SHA384WithRSA, oidSignatureSHA384WithRSA, RSA, crypto.SHA384},
+	{SHA512WithRSA, oidSignatureSHA512WithRSA, RSA, crypto.SHA512},
+	{SHA256WithRSAPSS, oidSignatureRSAPSS, RSA, crypto.SHA256},
+	{SHA384WithRSAPSS, oidSignatureRSAPSS, RSA, crypto.SHA384},
+	{SHA512WithRSAPSS, oidSignatureRSAPSS, RSA, crypto.SHA512},
+	{DSAWithSHA1, oidSignatureDSAWithSHA1, DSA, crypto.SHA1},
+	{DSAWithSHA256, oidSignatureDSAWithSHA256, DSA, crypto.SHA256},
+	{ECDSAWithSHA1, oidSignatureECDSAWithSHA1, ECDSA, crypto.SHA1},
+	{ECDSAWithSHA256, oidSignatureECDSAWithSHA256, ECDSA, crypto.SHA256},
+	{ECDSAWithSHA384, oidSignatureECDSAWithSHA384, ECDSA, crypto.SHA384},
+	{ECDSAWithSHA512, oidSignatureECDSAWithSHA512, ECDSA, crypto.SHA512},
+	{SM2WithSM3, oidSignatureSM2WithSM3, SM2, 255},
+	{SM2WithSHA1, oidSignatureSM2WithSHA1, SM2, crypto.SHA1},
+	{SM2WithSHA256, oidSignatureSM2WithSHA256, SM2, crypto.SHA256},
 }
 
 // pssParameters reflects the parameters in an AlgorithmIdentifier that
@@ -497,24 +385,22 @@ type pssParameters struct {
 
 // rsaPSSParameters returns an asn1.RawValue suitable for use as the Parameters
 // in an AlgorithmIdentifier that specifies RSA PSS.
-func rsaPSSParameters(hashFunc Hash) asn1.RawValue {
+func rsaPSSParameters(hashFunc crypto.Hash) asn1.RawValue {
 	var hashOID asn1.ObjectIdentifier
 
 	switch hashFunc {
-	case SHA256:
+	case crypto.SHA256:
 		hashOID = oidSHA256
-	case SHA384:
+	case crypto.SHA384:
 		hashOID = oidSHA384
-	case SHA512:
+	case crypto.SHA512:
 		hashOID = oidSHA512
 	}
 
 	params := pssParameters{
 		Hash: pkix.AlgorithmIdentifier{
-			Algorithm: hashOID,
-			Parameters: asn1.RawValue{
-				Tag: 5, /* ASN.1 NULL */
-			},
+			Algorithm:  hashOID,
+			Parameters: asn1.NullRawValue,
 		},
 		MGF: pkix.AlgorithmIdentifier{
 			Algorithm: oidMGF1,
@@ -524,10 +410,8 @@ func rsaPSSParameters(hashFunc Hash) asn1.RawValue {
 	}
 
 	mgf1Params := pkix.AlgorithmIdentifier{
-		Algorithm: hashOID,
-		Parameters: asn1.RawValue{
-			Tag: 5, /* ASN.1 NULL */
-		},
+		Algorithm:  hashOID,
+		Parameters: asn1.NullRawValue,
 	}
 
 	var err error
@@ -574,11 +458,10 @@ func getSignatureAlgorithmFromAI(ai pkix.AlgorithmIdentifier) SignatureAlgorithm
 	// https://tools.ietf.org/html/rfc3447#section-8.1), that the
 	// salt length matches the hash length, and that the trailer
 	// field has the default value.
-	asn1NULL := []byte{0x05, 0x00}
-	if !bytes.Equal(params.Hash.Parameters.FullBytes, asn1NULL) ||
+	if !bytes.Equal(params.Hash.Parameters.FullBytes, asn1.NullBytes) ||
 		!params.MGF.Algorithm.Equal(oidMGF1) ||
 		!mgf1HashFunc.Algorithm.Equal(params.Hash.Algorithm) ||
-		!bytes.Equal(mgf1HashFunc.Parameters.FullBytes, asn1NULL) ||
+		!bytes.Equal(mgf1HashFunc.Parameters.FullBytes, asn1.NullBytes) ||
 		params.TrailerField != 1 {
 		return UnknownSignatureAlgorithm
 	}
@@ -613,6 +496,7 @@ var (
 	oidPublicKeyRSA   = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 1}
 	oidPublicKeyDSA   = asn1.ObjectIdentifier{1, 2, 840, 10040, 4, 1}
 	oidPublicKeyECDSA = asn1.ObjectIdentifier{1, 2, 840, 10045, 2, 1}
+	oidPublicKeySM2   = asn1.ObjectIdentifier{1, 2, 840, 10045, 2, 1} //TODO this value is specified no where, need to confirm next
 )
 
 func getPublicKeyAlgorithmFromOID(oid asn1.ObjectIdentifier) PublicKeyAlgorithm {
@@ -648,11 +532,13 @@ var (
 	oidNamedCurveP256    = asn1.ObjectIdentifier{1, 2, 840, 10045, 3, 1, 7}
 	oidNamedCurveP384    = asn1.ObjectIdentifier{1, 3, 132, 0, 34}
 	oidNamedCurveP521    = asn1.ObjectIdentifier{1, 3, 132, 0, 35}
-	oidNamedCurveP256SM2 = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 301} // I get the SM2 ID through parsing the pem file generated by gmssl
+	oidNamedCurveP256SM2 = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 301}
 )
 
 func namedCurveFromOID(oid asn1.ObjectIdentifier) elliptic.Curve {
 	switch {
+	case oid.Equal(oidNamedCurveP256SM2):
+		return sm2.P256Sm2()
 	case oid.Equal(oidNamedCurveP224):
 		return elliptic.P224()
 	case oid.Equal(oidNamedCurveP256):
@@ -661,14 +547,14 @@ func namedCurveFromOID(oid asn1.ObjectIdentifier) elliptic.Curve {
 		return elliptic.P384()
 	case oid.Equal(oidNamedCurveP521):
 		return elliptic.P521()
-	case oid.Equal(oidNamedCurveP256SM2):
-		return sm2.P256Sm2()
 	}
 	return nil
 }
 
 func oidFromNamedCurve(curve elliptic.Curve) (asn1.ObjectIdentifier, bool) {
 	switch curve {
+	case sm2.P256Sm2():
+		return oidNamedCurveP256SM2, true
 	case elliptic.P224():
 		return oidNamedCurveP224, true
 	case elliptic.P256():
@@ -677,9 +563,8 @@ func oidFromNamedCurve(curve elliptic.Curve) (asn1.ObjectIdentifier, bool) {
 		return oidNamedCurveP384, true
 	case elliptic.P521():
 		return oidNamedCurveP521, true
-	case sm2.P256Sm2():
-		return oidNamedCurveP256SM2, true
 	}
+
 	return nil, false
 }
 
@@ -688,7 +573,7 @@ func oidFromNamedCurve(curve elliptic.Curve) (asn1.ObjectIdentifier, bool) {
 type KeyUsage int
 
 const (
-	KeyUsageDigitalSignature KeyUsage = 1 << iota
+	KeyUsageDigitalSignature  KeyUsage = 1 << iota
 	KeyUsageContentCommitment
 	KeyUsageKeyEncipherment
 	KeyUsageDataEncipherment
@@ -731,7 +616,7 @@ var (
 type ExtKeyUsage int
 
 const (
-	ExtKeyUsageAny ExtKeyUsage = iota
+	ExtKeyUsageAny                        ExtKeyUsage = iota
 	ExtKeyUsageServerAuth
 	ExtKeyUsageClientAuth
 	ExtKeyUsageCodeSigning
@@ -828,13 +713,28 @@ type Certificate struct {
 	ExtKeyUsage        []ExtKeyUsage           // Sequence of extended key usages.
 	UnknownExtKeyUsage []asn1.ObjectIdentifier // Encountered extended key usages unknown to this package.
 
-	BasicConstraintsValid bool // if true then the next two fields are valid.
+	// BasicConstraintsValid indicates whether IsCA, MaxPathLen,
+	// and MaxPathLenZero are valid.
+	BasicConstraintsValid bool
 	IsCA                  bool
-	MaxPathLen            int
-	// MaxPathLenZero indicates that BasicConstraintsValid==true and
-	// MaxPathLen==0 should be interpreted as an actual maximum path length
-	// of zero. Otherwise, that combination is interpreted as MaxPathLen
-	// not being set.
+
+	// MaxPathLen and MaxPathLenZero indicate the presence and
+	// value of the BasicConstraints' "pathLenConstraint".
+	//
+	// When parsing a certificate, a positive non-zero MaxPathLen
+	// means that the field was specified, -1 means it was unset,
+	// and MaxPathLenZero being true mean that the field was
+	// explicitly set to zero. The case of MaxPathLen==0 with MaxPathLenZero==false
+	// should be treated equivalent to -1 (unset).
+	//
+	// When generating a certificate, an unset pathLenConstraint
+	// can be requested with either MaxPathLen == -1 or using the
+	// zero value for both MaxPathLen and MaxPathLenZero.
+	MaxPathLen int
+	// MaxPathLenZero indicates that BasicConstraintsValid==true
+	// and MaxPathLen==0 should be interpreted as an actual
+	// maximum path length of zero. Otherwise, that combination is
+	// interpreted as MaxPathLen not being set.
 	MaxPathLenZero bool
 
 	SubjectKeyId   []byte
@@ -852,6 +752,7 @@ type Certificate struct {
 	// Name constraints
 	PermittedDNSDomainsCritical bool // if true then the name constraints are marked critical.
 	PermittedDNSDomains         []string
+	ExcludedDNSDomains          []string
 
 	// CRL Distribution Points
 	CRLDistributionPoints []string
@@ -881,6 +782,10 @@ func (ConstraintViolationError) Error() string {
 
 func (c *Certificate) Equal(other *Certificate) bool {
 	return bytes.Equal(c.Raw, other.Raw)
+}
+
+func (c *Certificate) hasSANExtension() bool {
+	return oidInExtensions(oidExtensionSubjectAltName, c.Extensions)
 }
 
 // Entrust have a broken root certificate (CN=Entrust.net Certification
@@ -969,38 +874,59 @@ func (c *Certificate) CheckSignature(algo SignatureAlgorithm, signed, signature 
 // CheckSignature verifies that signature is a valid signature over signed from
 // a crypto.PublicKey.
 func checkSignature(algo SignatureAlgorithm, signed, signature []byte, publicKey crypto.PublicKey) (err error) {
-	var hashType Hash
+	var hashType crypto.Hash
+
 	switch algo {
+	case SM2WithSM3:
+		//Do nothing here, just in case not go into default
 	case SHA1WithRSA, DSAWithSHA1, ECDSAWithSHA1, SM2WithSHA1:
-		hashType = SHA1
+		hashType = crypto.SHA1
 	case SHA256WithRSA, SHA256WithRSAPSS, DSAWithSHA256, ECDSAWithSHA256, SM2WithSHA256:
-		hashType = SHA256
+		hashType = crypto.SHA256
 	case SHA384WithRSA, SHA384WithRSAPSS, ECDSAWithSHA384:
-		hashType = SHA384
+		hashType = crypto.SHA384
 	case SHA512WithRSA, SHA512WithRSAPSS, ECDSAWithSHA512:
-		hashType = SHA512
+		hashType = crypto.SHA512
 	case MD2WithRSA, MD5WithRSA:
 		return InsecureAlgorithmError(algo)
-	case SM2WithSM3: // SM3WithRSA reserve
-		hashType = SM3
 	default:
 		return ErrUnsupportedAlgorithm
 	}
 
-	if !hashType.Available() {
-		return ErrUnsupportedAlgorithm
+	var h hash.Hash
+	if(algo==SM2WithSM3){
+		h = sm3.New()
+	}else{
+		if !hashType.Available() {
+			return ErrUnsupportedAlgorithm
+		}
+		h = hashType.New()
 	}
-	fnHash := func() []byte {
-		h := hashType.New()
-		h.Write(signed)
-		return h.Sum(nil)
-	}
+
+	h.Write(signed)
+	digest := h.Sum(nil)
+
 	switch pub := publicKey.(type) {
+	case *sm2.PublicKey:
+		sm2Sig := new(sm2Signature)
+		if rest, err := asn1.Unmarshal(signature, sm2Sig); err != nil {
+			return err
+		} else if len(rest) != 0 {
+			return errors.New("x509: trailing data after sm2 signature")
+		}
+		if sm2Sig.R.Sign() <= 0 || sm2Sig.S.Sign() <= 0 {
+			return errors.New("x509: sm2 signature contained zero or negative values")
+		}
+		if !sm2.Verify(pub, signed, sm2Sig.R, sm2Sig.S) {
+			return errors.New("x509: sm2 verification failure")
+		}
+
+		return
 	case *rsa.PublicKey:
 		if algo.isRSAPSS() {
-			return rsa.VerifyPSS(pub, crypto.Hash(hashType), fnHash(), signature, &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash})
+			return rsa.VerifyPSS(pub, hashType, digest, signature, &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash})
 		} else {
-			return rsa.VerifyPKCS1v15(pub, crypto.Hash(hashType), fnHash(), signature)
+			return rsa.VerifyPKCS1v15(pub, hashType, digest, signature)
 		}
 	case *dsa.PublicKey:
 		dsaSig := new(dsaSignature)
@@ -1012,7 +938,7 @@ func checkSignature(algo SignatureAlgorithm, signed, signature []byte, publicKey
 		if dsaSig.R.Sign() <= 0 || dsaSig.S.Sign() <= 0 {
 			return errors.New("x509: DSA signature contained zero or negative values")
 		}
-		if !dsa.Verify(pub, fnHash(), dsaSig.R, dsaSig.S) {
+		if !dsa.Verify(pub, digest, dsaSig.R, dsaSig.S) {
 			return errors.New("x509: DSA verification failure")
 		}
 		return
@@ -1026,20 +952,8 @@ func checkSignature(algo SignatureAlgorithm, signed, signature []byte, publicKey
 		if ecdsaSig.R.Sign() <= 0 || ecdsaSig.S.Sign() <= 0 {
 			return errors.New("x509: ECDSA signature contained zero or negative values")
 		}
-		switch pub.Curve {
-		case sm2.P256Sm2():
-			sm2pub := &sm2.PublicKey{
-				Curve: pub.Curve,
-				X:     pub.X,
-				Y:     pub.Y,
-			}
-			if !sm2.Sm2Verify(sm2pub, signed, nil, ecdsaSig.R, ecdsaSig.S) {
-				return errors.New("x509: SM2 verification failure")
-			}
-		default:
-			if !ecdsa.Verify(pub, fnHash(), ecdsaSig.R, ecdsaSig.S) {
-				return errors.New("x509: ECDSA verification failure")
-			}
+		if !ecdsa.Verify(pub, digest, ecdsaSig.R, ecdsaSig.S) {
+			return errors.New("x509: ECDSA verification failure")
 		}
 		return
 	}
@@ -1097,20 +1011,41 @@ type distributionPointName struct {
 	RelativeName pkix.RDNSequence `asn1:"optional,tag:1"`
 }
 
-// asn1Null is the ASN.1 encoding of a NULL value.
-var asn1Null = []byte{5, 0}
-
 func parsePublicKey(algo PublicKeyAlgorithm, keyData *publicKeyInfo) (interface{}, error) {
 	asn1Data := keyData.PublicKey.RightAlign()
 	switch algo {
+	case SM2:
+		paramsData := keyData.Algorithm.Parameters.FullBytes
+		namedCurveOID := new(asn1.ObjectIdentifier)
+		rest, err := asn1.Unmarshal(paramsData, namedCurveOID)
+		if err != nil {
+			return nil, err
+		}
+		if len(rest) != 0 {
+			return nil, errors.New("x509: trailing data after SM2 parameters")
+		}
+		namedCurve := namedCurveFromOID(*namedCurveOID)
+		if namedCurve == nil {
+			return nil, errors.New("x509: unsupported SM2 elliptic curve")
+		}
+		x, y := elliptic.Unmarshal(namedCurve, asn1Data)
+		if x == nil {
+			return nil, errors.New("x509: failed to unmarshal elliptic curve point")
+		}
+		pub := &sm2.PublicKey{
+			Curve: namedCurve,
+			X:     x,
+			Y:     y,
+		}
+		return pub, nil
 	case RSA:
 		// RSA public keys must have a NULL in the parameters
 		// (https://tools.ietf.org/html/rfc3279#section-2.3.1).
-		if !bytes.Equal(keyData.Algorithm.Parameters.FullBytes, asn1Null) {
+		if !bytes.Equal(keyData.Algorithm.Parameters.FullBytes, asn1.NullBytes) {
 			return nil, errors.New("x509: RSA key missing NULL parameters")
 		}
 
-		p := new(rsaPublicKey)
+		p := new(pkcs1PublicKey)
 		rest, err := asn1.Unmarshal(asn1Data, p)
 		if err != nil {
 			return nil, err
@@ -1260,6 +1195,10 @@ func parseCertificate(in *certificate) (*Certificate, error) {
 
 	out.PublicKeyAlgorithm =
 		getPublicKeyAlgorithmFromOID(in.TBSCertificate.PublicKey.Algorithm.Algorithm)
+	params, _ := asn1.Marshal(oidNamedCurveP256SM2)
+	if out.PublicKeyAlgorithm == ECDSA && reflect.DeepEqual(params, in.TBSCertificate.PublicKey.Algorithm.Parameters.FullBytes) {
+		out.PublicKeyAlgorithm = SM2
+	}
 	var err error
 	out.PublicKey, err = parsePublicKey(out.PublicKeyAlgorithm, &in.TBSCertificate.PublicKey)
 	if err != nil {
@@ -1323,7 +1262,7 @@ func parseCertificate(in *certificate) (*Certificate, error) {
 				out.IsCA = constraints.IsCA
 				out.MaxPathLen = constraints.MaxPathLen
 				out.MaxPathLenZero = out.MaxPathLen == 0
-
+				// TODO: map out.MaxPathLen to 0 if it has the -1 default value? (Issue 19285)
 			case 17:
 				out.DNSNames, out.EmailAddresses, out.IPAddresses, err = parseSANExtension(e.Value)
 				if err != nil {
@@ -1358,19 +1297,27 @@ func parseCertificate(in *certificate) (*Certificate, error) {
 					return nil, errors.New("x509: trailing data after X.509 NameConstraints")
 				}
 
-				if len(constraints.Excluded) > 0 && e.Critical {
-					return out, UnhandledCriticalExtension{}
+				getDNSNames := func(subtrees []generalSubtree, isCritical bool) (dnsNames []string, err error) {
+					for _, subtree := range subtrees {
+						if len(subtree.Name) == 0 {
+							if isCritical {
+								return nil, UnhandledCriticalExtension{}
+							}
+							continue
+						}
+						dnsNames = append(dnsNames, subtree.Name)
+					}
+
+					return dnsNames, nil
 				}
 
-				for _, subtree := range constraints.Permitted {
-					if len(subtree.Name) == 0 {
-						if e.Critical {
-							return out, UnhandledCriticalExtension{}
-						}
-						continue
-					}
-					out.PermittedDNSDomains = append(out.PermittedDNSDomains, subtree.Name)
+				if out.PermittedDNSDomains, err = getDNSNames(constraints.Permitted, e.Critical); err != nil {
+					return out, err
 				}
+				if out.ExcludedDNSDomains, err = getDNSNames(constraints.Excluded, e.Critical); err != nil {
+					return out, err
+				}
+				out.PermittedDNSDomainsCritical = e.Critical
 
 			case 31:
 				// RFC 5280, 4.2.1.13
@@ -1624,7 +1571,7 @@ func marshalSANs(dnsNames, emailAddresses []string, ipAddresses []net.IP) (derBy
 	return asn1.Marshal(rawValues)
 }
 
-func buildExtensions(template *Certificate) (ret []pkix.Extension, err error) {
+func buildExtensions(template *Certificate, authorityKeyId []byte) (ret []pkix.Extension, err error) {
 	ret = make([]pkix.Extension, 10 /* maximum number of elements. */)
 	n := 0
 
@@ -1698,9 +1645,9 @@ func buildExtensions(template *Certificate) (ret []pkix.Extension, err error) {
 		n++
 	}
 
-	if len(template.AuthorityKeyId) > 0 && !oidInExtensions(oidExtensionAuthorityKeyId, template.ExtraExtensions) {
+	if len(authorityKeyId) > 0 && !oidInExtensions(oidExtensionAuthorityKeyId, template.ExtraExtensions) {
 		ret[n].Id = oidExtensionAuthorityKeyId
-		ret[n].Value, err = asn1.Marshal(authKeyId{template.AuthorityKeyId})
+		ret[n].Value, err = asn1.Marshal(authKeyId{authorityKeyId})
 		if err != nil {
 			return
 		}
@@ -1754,16 +1701,22 @@ func buildExtensions(template *Certificate) (ret []pkix.Extension, err error) {
 		n++
 	}
 
-	if len(template.PermittedDNSDomains) > 0 &&
+	if (len(template.PermittedDNSDomains) > 0 || len(template.ExcludedDNSDomains) > 0) &&
 		!oidInExtensions(oidExtensionNameConstraints, template.ExtraExtensions) {
 		ret[n].Id = oidExtensionNameConstraints
 		ret[n].Critical = template.PermittedDNSDomainsCritical
 
 		var out nameConstraints
+
 		out.Permitted = make([]generalSubtree, len(template.PermittedDNSDomains))
 		for i, permitted := range template.PermittedDNSDomains {
 			out.Permitted[i] = generalSubtree{Name: permitted}
 		}
+		out.Excluded = make([]generalSubtree, len(template.ExcludedDNSDomains))
+		for i, excluded := range template.ExcludedDNSDomains {
+			out.Excluded[i] = generalSubtree{Name: excluded}
+		}
+
 		ret[n].Value, err = asn1.Marshal(out)
 		if err != nil {
 			return
@@ -1811,44 +1764,46 @@ func subjectBytes(cert *Certificate) ([]byte, error) {
 // signingParamsForPublicKey returns the parameters to use for signing with
 // priv. If requestedSigAlgo is not zero then it overrides the default
 // signature algorithm.
-func signingParamsForPublicKey(pub interface{}, requestedSigAlgo SignatureAlgorithm) (hashFunc Hash, sigAlgo pkix.AlgorithmIdentifier, err error) {
+func signingParamsForPublicKey(pub interface{}, requestedSigAlgo SignatureAlgorithm) (hashFunc crypto.Hash, sigAlgo pkix.AlgorithmIdentifier, err error) {
 	var pubType PublicKeyAlgorithm
-
 	switch pub := pub.(type) {
+	case *sm2.PublicKey:
+		pubType = SM2
+		switch pub.Curve {
+		case sm2.P256Sm2():
+			//hashFunc = tjSM3
+			hashFunc = 255
+			sigAlgo.Algorithm = oidSignatureSM2WithSM3
+			//hashFunc = crypto.SHA256
+			//sigAlgo.Algorithm = oidSignatureSM2WithSHA256
+		default:
+			err = errors.New("x509: SM2 unknown elliptic curve")
+		}
 	case *rsa.PublicKey:
 		pubType = RSA
-		hashFunc = SHA256
+		hashFunc = crypto.SHA256
 		sigAlgo.Algorithm = oidSignatureSHA256WithRSA
-		sigAlgo.Parameters = asn1.RawValue{
-			Tag: 5,
-		}
+		sigAlgo.Parameters = asn1.NullRawValue
 
 	case *ecdsa.PublicKey:
 		pubType = ECDSA
+
 		switch pub.Curve {
 		case elliptic.P224(), elliptic.P256():
-			hashFunc = SHA256
+			hashFunc = crypto.SHA256
 			sigAlgo.Algorithm = oidSignatureECDSAWithSHA256
 		case elliptic.P384():
-			hashFunc = SHA384
+			hashFunc = crypto.SHA384
 			sigAlgo.Algorithm = oidSignatureECDSAWithSHA384
 		case elliptic.P521():
-			hashFunc = SHA512
+			hashFunc = crypto.SHA512
 			sigAlgo.Algorithm = oidSignatureECDSAWithSHA512
 		default:
 			err = errors.New("x509: unknown elliptic curve")
 		}
-	case *sm2.PublicKey:
-		pubType = ECDSA
-		switch pub.Curve {
-		case sm2.P256Sm2():
-			hashFunc = SM3
-			sigAlgo.Algorithm = oidSignatureSM2WithSM3
-		default:
-			err = errors.New("x509: unknown SM2 curve")
-		}
+
 	default:
-		err = errors.New("x509: only RSA and ECDSA keys supported")
+		err = errors.New("x509: only SM2, RSA and ECDSA keys supported")
 	}
 
 	if err != nil {
@@ -1886,20 +1841,124 @@ func signingParamsForPublicKey(pub interface{}, requestedSigAlgo SignatureAlgori
 	return
 }
 
-// CreateCertificateToMem creates a new certificate based on a template. The
-// following members of template are used: SerialNumber, Subject, NotBefore,
-// NotAfter, KeyUsage, ExtKeyUsage, UnknownExtKeyUsage, BasicConstraintsValid,
-// IsCA, MaxPathLen, SubjectKeyId, DNSNames, PermittedDNSDomainsCritical,
-// PermittedDNSDomains, SignatureAlgorithm.
+// CreateCertificate creates a new certificate based on a template.
+// The following members of template are used: AuthorityKeyId,
+// BasicConstraintsValid, DNSNames, ExcludedDNSDomains, ExtKeyUsage,
+// IsCA, KeyUsage, MaxPathLen, MaxPathLenZero, NotAfter, NotBefore,
+// PermittedDNSDomains, PermittedDNSDomainsCritical, SerialNumber,
+// SignatureAlgorithm, Subject, SubjectKeyId, and UnknownExtKeyUsage.
 //
 // The certificate is signed by parent. If parent is equal to template then the
 // certificate is self-signed. The parameter pub is the public key of the
-// signer and priv is the private key of the signer.
+// signee and priv is the private key of the signer.
 //
-// The returned slice is the certificate in PEM encoding.
+// The returned slice is the certificate in DER encoding.
 //
 // All keys types that are implemented via crypto.Signer are supported (This
 // includes *rsa.PublicKey and *ecdsa.PublicKey.)
+//
+// The AuthorityKeyId will be taken from the SubjectKeyId of parent, if any,
+// unless the resulting certificate is self-signed. Otherwise the value from
+// template will be used.
+func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv interface{}) (cert []byte, err error) {
+	key, ok := priv.(crypto.Signer)
+	if !ok {
+		return nil, errors.New("x509: certificate private key does not implement crypto.Signer")
+	}
+
+	if template.SerialNumber == nil {
+		return nil, errors.New("x509: no SerialNumber given")
+	}
+
+	hashFunc, signatureAlgorithm, err := signingParamsForPublicKey(key.Public(), template.SignatureAlgorithm)
+	if err != nil {
+		return nil, err
+	}
+
+	publicKeyBytes, publicKeyAlgorithm, err := marshalPublicKey(pub)
+	if err != nil {
+		return nil, err
+	}
+
+	asn1Issuer, err := subjectBytes(parent)
+	if err != nil {
+		return
+	}
+
+	asn1Subject, err := subjectBytes(template)
+	if err != nil {
+		return
+	}
+
+	authorityKeyId := template.AuthorityKeyId
+	if !bytes.Equal(asn1Issuer, asn1Subject) && len(parent.SubjectKeyId) > 0 {
+		authorityKeyId = parent.SubjectKeyId
+	}
+
+	extensions, err := buildExtensions(template, authorityKeyId)
+	if err != nil {
+		return
+	}
+
+	encodedPublicKey := asn1.BitString{BitLength: len(publicKeyBytes) * 8, Bytes: publicKeyBytes}
+	c := tbsCertificate{
+		Version:            2,
+		SerialNumber:       template.SerialNumber,
+		SignatureAlgorithm: signatureAlgorithm,
+		Issuer:             asn1.RawValue{FullBytes: asn1Issuer},
+		Validity:           validity{template.NotBefore.UTC(), template.NotAfter.UTC()},
+		Subject:            asn1.RawValue{FullBytes: asn1Subject},
+		PublicKey:          publicKeyInfo{nil, publicKeyAlgorithm, encodedPublicKey},
+		Extensions:         extensions,
+	}
+
+	tbsCertContents, err := asn1.Marshal(c)
+	if err != nil {
+		return
+	}
+
+	c.Raw = tbsCertContents
+
+	var h hash.Hash
+	if(hashFunc == 255){
+		h = sm3.New()
+	}else{
+		h = hashFunc.New()
+	}
+
+	h.Write(tbsCertContents)
+	digest := h.Sum(nil)
+
+	var signerOpts crypto.SignerOpts
+	signerOpts = hashFunc
+	if template.SignatureAlgorithm != 0 && template.SignatureAlgorithm.isRSAPSS() {
+		signerOpts = &rsa.PSSOptions{
+			SaltLength: rsa.PSSSaltLengthEqualsHash,
+			Hash:       hashFunc,
+		}
+	}
+
+	var signature []byte
+	switch key.Public().(type) {
+	case *sm2.PublicKey:
+		signature, err = key.Sign(rand, tbsCertContents, signerOpts)
+		if err != nil {
+			return
+		}
+	default:
+		signature, err = key.Sign(rand, digest, signerOpts)
+		if err != nil {
+			return
+		}
+	}
+
+	return asn1.Marshal(certificate{
+		nil,
+		c,
+		signatureAlgorithm,
+		asn1.BitString{Bytes: signature, BitLength: len(signature) * 8},
+	})
+}
 
 // pemCRLPrefix is the magic string that indicates that we have a PEM encoded
 // CRL.
@@ -1978,20 +2037,22 @@ func (c *Certificate) CreateCRL(rand io.Reader, priv interface{}, revokedCerts [
 		return
 	}
 
-	digest := tbsCertListContents
-	switch hashFunc {
-	case SM3:
-		break
-	default:
-		h := hashFunc.New()
-		h.Write(tbsCertListContents)
-		digest = h.Sum(nil)
-	}
+	h := hashFunc.New()
+	h.Write(tbsCertListContents)
+	digest := h.Sum(nil)
 
 	var signature []byte
-	signature, err = key.Sign(rand, digest, hashFunc)
-	if err != nil {
-		return
+	switch key.(type) {
+	case *sm2.PrivateKey:
+		signature, err = key.Sign(rand, tbsCertListContents, hashFunc)
+		if err != nil {
+			return
+		}
+	default:
+		signature, err = key.Sign(rand, digest, hashFunc)
+		if err != nil {
+			return
+		}
 	}
 
 	return asn1.Marshal(pkix.CertificateList{
@@ -2127,26 +2188,31 @@ func parseCSRExtensions(rawAttributes []asn1.RawValue) ([]pkix.Extension, error)
 	return ret, nil
 }
 
-// CreateCertificateRequest creates a new certificate request based on a template.
-// The following members of template are used: Subject, Attributes,
-// SignatureAlgorithm, Extensions, DNSNames, EmailAddresses, and IPAddresses.
-// The private key is the private key of the signer.
+// CreateCertificateRequest creates a new certificate request based on a
+// template. The following members of template are used: Attributes, DNSNames,
+// EmailAddresses, ExtraExtensions, IPAddresses, SignatureAlgorithm, and
+// Subject. The private key is the private key of the signer.
 //
 // The returned slice is the certificate request in DER encoding.
 //
 // All keys types that are implemented via crypto.Signer are supported (This
 // includes *rsa.PublicKey and *ecdsa.PublicKey.)
-func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, signer crypto.Signer) (csr []byte, err error) {
-	var hashFunc Hash
+func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv interface{}) (csr []byte, err error) {
+	key, ok := priv.(crypto.Signer)
+	if !ok {
+		return nil, errors.New("x509: certificate private key does not implement crypto.Signer")
+	}
+
+	var hashFunc crypto.Hash
 	var sigAlgo pkix.AlgorithmIdentifier
-	hashFunc, sigAlgo, err = signingParamsForPublicKey(signer.Public(), template.SignatureAlgorithm)
+	hashFunc, sigAlgo, err = signingParamsForPublicKey(key.Public(), template.SignatureAlgorithm)
 	if err != nil {
 		return nil, err
 	}
 
 	var publicKeyBytes []byte
 	var publicKeyAlgorithm pkix.AlgorithmIdentifier
-	publicKeyBytes, publicKeyAlgorithm, err = marshalPublicKey(signer.Public())
+	publicKeyBytes, publicKeyAlgorithm, err = marshalPublicKey(key.Public())
 	if err != nil {
 		return nil, err
 	}
@@ -2258,21 +2324,24 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, sign
 	}
 	tbsCSR.Raw = tbsCSRContents
 
-	digest := tbsCSRContents
-	switch template.SignatureAlgorithm {
-	case SM2WithSM3, SM2WithSHA1, SM2WithSHA256, UnknownSignatureAlgorithm:
-		break
+
+	var signature []byte
+	switch key.(type) {
+	case *sm2.PrivateKey:
+		signature, err = key.Sign(rand, tbsCSRContents, hashFunc)
+		if err != nil {
+			return
+		}
 	default:
 		h := hashFunc.New()
 		h.Write(tbsCSRContents)
-		digest = h.Sum(nil)
+		digest := h.Sum(nil)
+		signature, err = key.Sign(rand, digest, hashFunc)
+		if err != nil {
+			return
+		}
 	}
 
-	var signature []byte
-	signature, err = signer.Sign(rand, digest, hashFunc)
-	if err != nil {
-		return
-	}
 
 	return asn1.Marshal(certificateRequest{
 		TBSCSR:             tbsCSR,
@@ -2351,113 +2420,17 @@ func (c *CertificateRequest) CheckSignature() error {
 	return checkSignature(c.SignatureAlgorithm, c.RawTBSCertificateRequest, c.Signature, c.PublicKey)
 }
 
-func (c *Certificate) ToX509Certificate() *x509.Certificate {
-	x509cert := &x509.Certificate{
-		Raw:                     c.Raw,
-		RawTBSCertificate:       c.RawTBSCertificate,
-		RawSubjectPublicKeyInfo: c.RawSubjectPublicKeyInfo,
-		RawSubject:              c.RawSubject,
-		RawIssuer:               c.RawIssuer,
-
-		Signature:          c.Signature,
-		SignatureAlgorithm: x509.SignatureAlgorithm(c.SignatureAlgorithm),
-
-		PublicKeyAlgorithm: x509.PublicKeyAlgorithm(c.PublicKeyAlgorithm),
-		PublicKey:          c.PublicKey,
-
-		Version:      c.Version,
-		SerialNumber: c.SerialNumber,
-		Issuer:       c.Issuer,
-		Subject:      c.Subject,
-		NotBefore:    c.NotBefore,
-		NotAfter:     c.NotAfter,
-		KeyUsage:     x509.KeyUsage(c.KeyUsage),
-
-		Extensions: c.Extensions,
-
-		ExtraExtensions: c.ExtraExtensions,
-
-		UnhandledCriticalExtensions: c.UnhandledCriticalExtensions,
-
-		//ExtKeyUsage:	[]x509.ExtKeyUsage(c.ExtKeyUsage) ,
-		UnknownExtKeyUsage: c.UnknownExtKeyUsage,
-
-		BasicConstraintsValid: c.BasicConstraintsValid,
-		IsCA:                  c.IsCA,
-		MaxPathLen:            c.MaxPathLen,
-		// MaxPathLenZero indicates that BasicConstraintsValid==true and
-		// MaxPathLen==0 should be interpreted as an actual maximum path length
-		// of zero. Otherwise, that combination is interpreted as MaxPathLen
-		// not being set.
-		MaxPathLenZero: c.MaxPathLenZero,
-
-		SubjectKeyId:   c.SubjectKeyId,
-		AuthorityKeyId: c.AuthorityKeyId,
-
-		// RFC 5280, 4.2.2.1 (Authority Information Access)
-		OCSPServer:            c.OCSPServer,
-		IssuingCertificateURL: c.IssuingCertificateURL,
-
-		// Subject Alternate Name values
-		DNSNames:       c.DNSNames,
-		EmailAddresses: c.EmailAddresses,
-		IPAddresses:    c.IPAddresses,
-
-		// Name constraints
-		PermittedDNSDomainsCritical: c.PermittedDNSDomainsCritical,
-		PermittedDNSDomains:         c.PermittedDNSDomains,
-
-		// CRL Distribution Points
-		CRLDistributionPoints: c.CRLDistributionPoints,
-
-		PolicyIdentifiers: c.PolicyIdentifiers,
+func Pem2Cert(b []byte) (*Certificate, error) {
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return nil, fmt.Errorf("credentials: failed to decode cert pem")
 	}
-
-	for _, val := range c.ExtKeyUsage {
-		x509cert.ExtKeyUsage = append(x509cert.ExtKeyUsage, x509.ExtKeyUsage(val))
+	if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+		return nil, fmt.Errorf("credentials: block type error")
 	}
-
-	return x509cert
-}
-
-func (c *Certificate) FromX509Certificate(x509Cert *x509.Certificate) {
-	c.Raw = x509Cert.Raw
-	c.RawTBSCertificate = x509Cert.RawTBSCertificate
-	c.RawSubjectPublicKeyInfo = x509Cert.RawSubjectPublicKeyInfo
-	c.RawSubject = x509Cert.RawSubject
-	c.RawIssuer = x509Cert.RawIssuer
-	c.Signature = x509Cert.Signature
-	c.SignatureAlgorithm = SM2WithSM3
-	c.PublicKeyAlgorithm = PublicKeyAlgorithm(x509Cert.PublicKeyAlgorithm)
-	c.PublicKey = x509Cert.PublicKey
-	c.Version = x509Cert.Version
-	c.SerialNumber = x509Cert.SerialNumber
-	c.Issuer = x509Cert.Issuer
-	c.Subject = x509Cert.Subject
-	c.NotBefore = x509Cert.NotBefore
-	c.NotAfter = x509Cert.NotAfter
-	c.KeyUsage = KeyUsage(x509Cert.KeyUsage)
-	c.Extensions = x509Cert.Extensions
-	c.ExtraExtensions = x509Cert.ExtraExtensions
-	c.UnhandledCriticalExtensions = x509Cert.UnhandledCriticalExtensions
-	c.UnknownExtKeyUsage = x509Cert.UnknownExtKeyUsage
-	c.BasicConstraintsValid = x509Cert.BasicConstraintsValid
-	c.IsCA = x509Cert.IsCA
-	c.MaxPathLen = x509Cert.MaxPathLen
-	c.MaxPathLenZero = x509Cert.MaxPathLenZero
-	c.SubjectKeyId = x509Cert.SubjectKeyId
-	c.AuthorityKeyId = x509Cert.AuthorityKeyId
-	c.OCSPServer = x509Cert.OCSPServer
-	c.IssuingCertificateURL = x509Cert.IssuingCertificateURL
-	c.DNSNames = x509Cert.DNSNames
-	c.EmailAddresses = x509Cert.EmailAddresses
-	c.IPAddresses = x509Cert.IPAddresses
-	c.PermittedDNSDomainsCritical = x509Cert.PermittedDNSDomainsCritical
-	c.PermittedDNSDomains = x509Cert.PermittedDNSDomains
-	c.CRLDistributionPoints = x509Cert.CRLDistributionPoints
-	c.PolicyIdentifiers = x509Cert.PolicyIdentifiers
-
-	for _, val := range x509Cert.ExtKeyUsage {
-		c.ExtKeyUsage = append(c.ExtKeyUsage, ExtKeyUsage(val))
+	cert, err := ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("credentials: parse cert error : %v", err)
 	}
+	return cert, nil
 }

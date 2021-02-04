@@ -1,21 +1,13 @@
-/*
-Copyright Suzhou Tongji Fintech Research Institute 2017 All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
 package gmtls
 
-import "bytes"
+import (
+	"bytes"
+	"strings"
+)
 
 type clientHelloMsg struct {
 	raw                          []byte
@@ -200,7 +192,7 @@ func (m *clientHelloMsg) marshal() []byte {
 		z = z[9:]
 	}
 	if len(m.supportedCurves) > 0 {
-		// http://tools.ietf.org/html/rfc4492#section-5.5.1
+		// https://tools.ietf.org/html/rfc4492#section-5.5.1
 		z[0] = byte(extensionSupportedCurves >> 8)
 		z[1] = byte(extensionSupportedCurves)
 		l := 2 + 2*len(m.supportedCurves)
@@ -217,7 +209,7 @@ func (m *clientHelloMsg) marshal() []byte {
 		}
 	}
 	if len(m.supportedPoints) > 0 {
-		// http://tools.ietf.org/html/rfc4492#section-5.5.2
+		// https://tools.ietf.org/html/rfc4492#section-5.5.2
 		z[0] = byte(extensionSupportedPoints >> 8)
 		z[1] = byte(extensionSupportedPoints)
 		l := 1 + len(m.supportedPoints)
@@ -232,7 +224,7 @@ func (m *clientHelloMsg) marshal() []byte {
 		}
 	}
 	if m.ticketSupported {
-		// http://tools.ietf.org/html/rfc5077#section-3.2
+		// https://tools.ietf.org/html/rfc5077#section-3.2
 		z[0] = byte(extensionSessionTicket >> 8)
 		z[1] = byte(extensionSessionTicket)
 		l := len(m.sessionTicket)
@@ -404,6 +396,12 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 				}
 				if nameType == 0 {
 					m.serverName = string(d[:nameLen])
+					// An SNI value may not include a
+					// trailing dot. See
+					// https://tools.ietf.org/html/rfc6066#section-3.
+					if strings.HasSuffix(m.serverName, ".") {
+						return false
+					}
 					break
 				}
 				d = d[nameLen:]
@@ -416,7 +414,7 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 		case extensionStatusRequest:
 			m.ocspStapling = length > 0 && data[0] == statusTypeOCSP
 		case extensionSupportedCurves:
-			// http://tools.ietf.org/html/rfc4492#section-5.5.1
+			// https://tools.ietf.org/html/rfc4492#section-5.5.1
 			if length < 2 {
 				return false
 			}
@@ -432,7 +430,7 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 				d = d[2:]
 			}
 		case extensionSupportedPoints:
-			// http://tools.ietf.org/html/rfc4492#section-5.5.2
+			// https://tools.ietf.org/html/rfc4492#section-5.5.2
 			if length < 1 {
 				return false
 			}
@@ -443,7 +441,7 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 			m.supportedPoints = make([]uint8, l)
 			copy(m.supportedPoints, data[1:])
 		case extensionSessionTicket:
-			// http://tools.ietf.org/html/rfc5077#section-3.2
+			// https://tools.ietf.org/html/rfc5077#section-3.2
 			m.ticketSupported = true
 			m.sessionTicket = data[:length]
 		case extensionSignatureAlgorithms:
@@ -461,7 +459,6 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 			for i := range m.supportedSignatureAlgorithms {
 				m.supportedSignatureAlgorithms[i] = SignatureScheme(d[0])<<8 | SignatureScheme(d[1])
 				d = d[2:]
-			
 			}
 		case extensionRenegotiationInfo:
 			if length == 0 {
@@ -1205,9 +1202,9 @@ type certificateRequestMsg struct {
 	// 1.2.
 	hasSignatureAndHash bool
 
-	certificateTypes       []byte
+	certificateTypes             []byte
 	supportedSignatureAlgorithms []SignatureScheme
-	certificateAuthorities [][]byte
+	certificateAuthorities       [][]byte
 }
 
 func (m *certificateRequestMsg) equal(i interface{}) bool {
@@ -1227,7 +1224,7 @@ func (m *certificateRequestMsg) marshal() (x []byte) {
 		return m.raw
 	}
 
-	// See http://tools.ietf.org/html/rfc4346#section-7.4.4
+	// See https://tools.ietf.org/html/rfc4346#section-7.4.4
 	length := 1 + len(m.certificateTypes) + 2
 	casLength := 0
 	for _, ca := range m.certificateAuthorities {
@@ -1236,7 +1233,7 @@ func (m *certificateRequestMsg) marshal() (x []byte) {
 	length += casLength
 
 	if m.hasSignatureAndHash {
-		length += 2 +2*len(m.supportedSignatureAlgorithms)
+		length += 2 + 2*len(m.supportedSignatureAlgorithms)
 	}
 
 	x = make([]byte, 4+length)
@@ -1356,7 +1353,7 @@ func (m *certificateRequestMsg) unmarshal(data []byte) bool {
 type certificateVerifyMsg struct {
 	raw                 []byte
 	hasSignatureAndHash bool
-	signatureAlgorithm    SignatureScheme
+	signatureAlgorithm  SignatureScheme
 	signature           []byte
 }
 
@@ -1377,7 +1374,7 @@ func (m *certificateVerifyMsg) marshal() (x []byte) {
 		return m.raw
 	}
 
-	// See http://tools.ietf.org/html/rfc4346#section-7.4.8
+	// See https://tools.ietf.org/html/rfc4346#section-7.4.8
 	siglength := len(m.signature)
 	length := 2 + siglength
 	if m.hasSignatureAndHash {
@@ -1455,7 +1452,7 @@ func (m *newSessionTicketMsg) marshal() (x []byte) {
 		return m.raw
 	}
 
-	// See http://tools.ietf.org/html/rfc5077#section-3.3
+	// See https://tools.ietf.org/html/rfc5077#section-3.3
 	ticketLen := len(m.ticket)
 	length := 2 + 4 + ticketLen
 	x = make([]byte, 4+length)
@@ -1553,7 +1550,7 @@ func eqByteSlices(x, y [][]byte) bool {
 	return true
 }
 
-func  eqSignatureAlgorithms(x, y []SignatureScheme) bool  {
+func eqSignatureAlgorithms(x, y []SignatureScheme) bool {
 	if len(x) != len(y) {
 		return false
 	}

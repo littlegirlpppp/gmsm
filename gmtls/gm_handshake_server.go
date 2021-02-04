@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build single_cert
-
 package gmtls
 
 import (
@@ -144,25 +142,25 @@ func (hs *serverHandshakeStateGM) readClientHello() (isResume bool, err error) {
 	hs.hello = new(serverHelloMsg)
 
 	//supportedCurve := false
-	//	preferredCurves := c.config.curvePreferences()
-	//Curves:
-	//	for _, curve := range hs.clientHello.supportedCurves {
-	//		for _, supported := range preferredCurves {
-	//			if supported == curve {
-	//				supportedCurve = true
-	//				break Curves
-	//			}
-	//		}
-	//	}
-	//
-	//	supportedPointFormat := false
-	//	for _, pointFormat := range hs.clientHello.supportedPoints {
-	//		if pointFormat == pointFormatUncompressed {
-	//			supportedPointFormat = true
-	//			break
-	//		}
-	//	}
-	//	hs.ellipticOk = supportedCurve && supportedPointFormat
+//	preferredCurves := c.config.curvePreferences()
+//Curves:
+//	for _, curve := range hs.clientHello.supportedCurves {
+//		for _, supported := range preferredCurves {
+//			if supported == curve {
+//				supportedCurve = true
+//				break Curves
+//			}
+//		}
+//	}
+//
+//	supportedPointFormat := false
+//	for _, pointFormat := range hs.clientHello.supportedPoints {
+//		if pointFormat == pointFormatUncompressed {
+//			supportedPointFormat = true
+//			break
+//		}
+//	}
+//	hs.ellipticOk = supportedCurve && supportedPointFormat
 
 	foundCompression := false
 	// We only support null compression, so check that the client offered it.
@@ -386,7 +384,7 @@ func (hs *serverHandshakeStateGM) doFullHandshake() error {
 	}
 
 	keyAgreement := hs.suite.ka(c.vers)
-	skx, err := keyAgreement.generateServerKeyExchange(c.config, hs.cert, hs.cert, hs.clientHello, hs.hello)
+	skx, err := keyAgreement.generateServerKeyExchange(c.config, hs.cert, hs.clientHello, hs.hello)
 	if err != nil {
 		c.sendAlert(alertHandshakeFailure)
 		return err
@@ -519,6 +517,7 @@ func (hs *serverHandshakeStateGM) doFullHandshake() error {
 		if digest, err = hs.finishedHash.hashForClientCertificate(sigType, hashFunc, hs.masterSecret); err == nil {
 			err = verifyHandshakeSignature(sigType, pub, hashFunc, digest, certVerify.signature)
 		}
+		
 		if err != nil {
 			c.sendAlert(alertBadCertificate)
 			return errors.New("tls: could not validate signature of connection nonces: " + err.Error())
