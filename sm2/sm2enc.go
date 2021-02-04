@@ -122,15 +122,18 @@ func (key *PrivateKey) Decrypt(rand io.Reader, msg []byte, opts crypto.Decrypter
 	return Decrypt(msg, key)
 }
 
-func Decrypt(c []byte, key *PrivateKey) ([]byte, error) {
-	// to do check
-	//c1Len := 1 + 2*((key.Curve.Params().BitSize + 7) >> 3)
-	//klen := (len(c) - c1Len - sm3.Size)*8
-	//x1, y1 := elliptic.Unmarshal(key.Curve, c[:c1Len])
-	//if x1 == nil {
-	//	return nil, DecryptionErr
-	//}
+func pointFromBytes(buf []byte) (x, y *big.Int) {
+	if len(buf) != 65 || buf[0] != 0x4 {
+		return nil, nil
+	}
 
+	x = new(big.Int).SetBytes(buf[1:33])
+	y = new(big.Int).SetBytes(buf[33:])
+
+	return
+}
+
+func Decrypt(c []byte, key *PrivateKey) ([]byte, error) {
 	sm2enc := new(EncData)
 	_, err := asn1.Unmarshal(c, sm2enc)
 	if err != nil {
@@ -138,6 +141,14 @@ func Decrypt(c []byte, key *PrivateKey) ([]byte, error) {
 	}
 	klen := len(sm2enc.C2)*8
 
+	//这里ccs-gm最新版本 返回的x1 y1是nil,
+	x1, y1 := pointFromBytes(c[:65])
+	if x1!=nil{
+
+	}
+	if y1!=nil{
+
+	}
 	//dB*C1
 	x2,y2 := key.Curve.ScalarMult(sm2enc.X, sm2enc.Y, key.D.Bytes())
 
