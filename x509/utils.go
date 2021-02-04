@@ -1,15 +1,17 @@
 package x509
 
 import (
-	"bytes"
 	"crypto"
+	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/pem"
 	"errors"
 	"github.com/littlegirlpppp/gmsm/sm2"
+	"math/big"
+	"reflect"
 )
 
 func ReadPrivateKeyFromPem(privateKeyPem []byte, pwd []byte) (*sm2.PrivateKey, error) {
@@ -18,30 +20,45 @@ func ReadPrivateKeyFromPem(privateKeyPem []byte, pwd []byte) (*sm2.PrivateKey, e
 	if block == nil {
 		return nil, errors.New("failed to decode private key")
 	}
-	priv, err := ParsePKCS8PrivateKey(block.Bytes, pwd)
-	return priv, err
+	priv, err := ParsePKCS8PrivateKey(block.Bytes)
+	return priv.(*sm2.PrivateKey), err
 }
 
 func WritePrivateKeyToPem(key *sm2.PrivateKey, pwd []byte) ([]byte, error) {
-	var block *pem.Block
-	der, err := MarshalSm2PrivateKey(key, pwd) //Convert private key to DER format
-	if err != nil {
-		return nil, err
-	}
-	if pwd != nil {
-		block = &pem.Block{
-			Type:  "ENCRYPTED PRIVATE KEY",
-			Bytes: der,
-		}
-	} else {
-		block = &pem.Block{
-			Type:  "PRIVATE KEY",
-			Bytes: der,
-		}
-	}
-	certPem := pem.EncodeToMemory(block)
-	return certPem, nil
+	//var block *pem.Block
+	//der, err := MarshalSm2PrivateKey(key, pwd) //Convert private key to DER format
+	//if err != nil {
+	//	return nil, err
+	//}
+	//if pwd != nil {
+	//	block = &pem.Block{
+	//		Type:  "ENCRYPTED PRIVATE KEY",
+	//		Bytes: der,
+	//	}
+	//} else {
+	//	block = &pem.Block{
+	//		Type:  "PRIVATE KEY",
+	//		Bytes: der,
+	//	}
+	//}
+	//certPem := pem.EncodeToMemory(block)
+	return nil, nil
 }
+var (
+	oidPBES1  = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 5, 3}  // pbeWithMD5AndDES-CBC(PBES1)
+	oidPBES2  = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 5, 13} // id-PBES2(PBES2)
+	oidPBKDF2 = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 5, 12} // id-PBKDF2
+
+	oidKEYMD5    = asn1.ObjectIdentifier{1, 2, 840, 113549, 2, 5}
+	oidKEYSHA1   = asn1.ObjectIdentifier{1, 2, 840, 113549, 2, 7}
+	oidKEYSHA256 = asn1.ObjectIdentifier{1, 2, 840, 113549, 2, 9}
+	oidKEYSHA512 = asn1.ObjectIdentifier{1, 2, 840, 113549, 2, 11}
+
+	oidAES128CBC = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 1, 2}
+	oidAES256CBC = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 1, 42}
+
+	oidSM2 = asn1.ObjectIdentifier{1, 2, 840, 10045, 2, 1}
+)
 
 func ReadPublicKeyFromPem(publicKeyPem []byte) (*sm2.PublicKey, error) {
 	block, _ := pem.Decode(publicKeyPem)
@@ -50,18 +67,35 @@ func ReadPublicKeyFromPem(publicKeyPem []byte) (*sm2.PublicKey, error) {
 	}
 	return ParseSm2PublicKey(block.Bytes)
 }
+func ParseSm2PublicKey(der []byte) (*sm2.PublicKey, error) {
+	var pubkey pkixPublicKey
 
-func WritePublicKeyToPem(key *sm2.PublicKey) ([]byte, error) {
-	der, err := MarshalSm2PublicKey(key) //Convert publick key to DER format
-	if err != nil {
+	if _, err := asn1.Unmarshal(der, &pubkey); err != nil {
 		return nil, err
 	}
-	block := &pem.Block{
-		Type:  "PUBLIC KEY",
-		Bytes: der,
+	if !reflect.DeepEqual(pubkey.Algo.Algorithm, oidSM2) {
+		return nil, errors.New("x509: not sm2 elliptic curve")
 	}
-	certPem := pem.EncodeToMemory(block)
-	return certPem, nil
+	curve := sm2.P256Sm2()
+	x, y := elliptic.Unmarshal(curve, pubkey.BitString.Bytes)
+	pub := sm2.PublicKey{
+		Curve: curve,
+		X:     x,
+		Y:     y,
+	}
+	return &pub, nil
+}
+func WritePublicKeyToPem(key *sm2.PublicKey) ([]byte, error) {
+	//der, err := MarshalSm2PublicKey(key) //Convert publick key to DER format
+	//if err != nil {
+	//	return nil, err
+	//}
+	//block := &pem.Block{
+	//	Type:  "PUBLIC KEY",
+	//	Bytes: der,
+	//}
+	//certPem := pem.EncodeToMemory(block)
+	return nil, nil
 }
 
 func ReadCertificateRequestFromPem(certPem []byte) (*CertificateRequest, error) {
@@ -93,118 +127,21 @@ func ReadCertificateFromPem(certPem []byte) (*Certificate, error) {
 	return ParseCertificate(block.Bytes)
 }
 
-// CreateCertificate creates a new certificate based on a template. The
-// following members of template are used: SerialNumber, Subject, NotBefore,
-// NotAfter, KeyUsage, ExtKeyUsage, UnknownExtKeyUsage, BasicConstraintsValid,
-// IsCA, MaxPathLen, SubjectKeyId, DNSNames, PermittedDNSDomainsCritical,
-// PermittedDNSDomains, SignatureAlgorithm.
-//
-// The certificate is signed by parent. If parent is equal to template then the
-// certificate is self-signed. The parameter pub is the public key of the
-// signee and priv is the private key of the signer.
-//
-// The returned slice is the certificate in DER encoding.
-//
-// All keys types that are implemented via crypto.Signer are supported (This
-// includes *rsa.PublicKey and *ecdsa.PublicKey.)
-func CreateCertificate(template, parent *Certificate, publicKey *sm2.PublicKey, signer crypto.Signer) ([]byte, error) {
-	if template.SerialNumber == nil {
-		return nil, errors.New("x509: no SerialNumber given")
-	}
-
-	hashFunc, signatureAlgorithm, err := signingParamsForPublicKey(signer.Public(), template.SignatureAlgorithm)
-	if err != nil {
-		return nil, err
-	}
-
-	publicKeyBytes, publicKeyAlgorithm, err := marshalPublicKey(publicKey)
-	if err != nil {
-		return nil, err
-	}
-
-	asn1Issuer, err := subjectBytes(parent)
-	if err != nil {
-		return nil, err
-	}
-
-	asn1Subject, err := subjectBytes(template)
-	if err != nil {
-		return nil, err
-	}
-
-	if !bytes.Equal(asn1Issuer, asn1Subject) && len(parent.SubjectKeyId) > 0 {
-		template.AuthorityKeyId = parent.SubjectKeyId
-	}
-
-	extensions, err := buildExtensions(template)
-	if err != nil {
-		return nil, err
-	}
-	encodedPublicKey := asn1.BitString{BitLength: len(publicKeyBytes) * 8, Bytes: publicKeyBytes}
-	c := tbsCertificate{
-		Version:            2,
-		SerialNumber:       template.SerialNumber,
-		SignatureAlgorithm: signatureAlgorithm,
-		Issuer:             asn1.RawValue{FullBytes: asn1Issuer},
-		Validity:           validity{template.NotBefore.UTC(), template.NotAfter.UTC()},
-		Subject:            asn1.RawValue{FullBytes: asn1Subject},
-		PublicKey:          publicKeyInfo{nil, publicKeyAlgorithm, encodedPublicKey},
-		Extensions:         extensions,
-	}
-
-	tbsCertContents, err := asn1.Marshal(c)
-	if err != nil {
-		return nil, err
-	}
-
-	c.Raw = tbsCertContents
-
-	digest := tbsCertContents
-	switch template.SignatureAlgorithm {
-	case SM2WithSM3, SM2WithSHA1, SM2WithSHA256:
-		break
-	default:
-		h := hashFunc.New()
-		h.Write(tbsCertContents)
-		digest = h.Sum(nil)
-	}
-
-	var signerOpts crypto.SignerOpts
-	signerOpts = hashFunc
-	if template.SignatureAlgorithm != 0 && template.SignatureAlgorithm.isRSAPSS() {
-		signerOpts = &rsa.PSSOptions{
-			SaltLength: rsa.PSSSaltLengthEqualsHash,
-			Hash:       crypto.Hash(hashFunc),
-		}
-	}
-
-	var signature []byte
-	signature, err = signer.Sign(rand.Reader, digest, signerOpts)
-	if err != nil {
-		return nil, err
-	}
-	return asn1.Marshal(certificate{
-		nil,
-		c,
-		signatureAlgorithm,
-		asn1.BitString{Bytes: signature, BitLength: len(signature) * 8},
-	})
-}
 
 // CreateCertificateToPem creates a new certificate based on a template and
 // encodes it to PEM format. It uses CreateCertificate to create certificate
 // and returns its PEM format.
 func CreateCertificateToPem(template, parent *Certificate, pubKey *sm2.PublicKey, signer crypto.Signer) ([]byte, error) {
-	der, err := CreateCertificate(template, parent, pubKey, signer)
-	if err != nil {
-		return nil, err
-	}
-	block := &pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: der,
-	}
-	certPem := pem.EncodeToMemory(block)
-	return certPem, nil
+	//der, err := CreateCertificate(template, parent, pubKey, signer)
+	//if err != nil {
+	//	return nil, err
+	//}
+	//block := &pem.Block{
+	//	Type:  "CERTIFICATE",
+	//	Bytes: der,
+	//}
+	//certPem := pem.EncodeToMemory(block)
+	return nil, nil
 }
 
 // todo 新增加的适配用
@@ -214,6 +151,75 @@ func ParseSm2CertifateToX509Test(asn1data []byte) (*x509.Certificate, error) {
 		return nil, err
 	}
 	return sm2Cert.ToX509Certificate(), nil
+}
+
+func (c *Certificate) ToX509Certificate() *x509.Certificate {
+	x509cert := &x509.Certificate{
+		Raw:                     c.Raw,
+		RawTBSCertificate:       c.RawTBSCertificate,
+		RawSubjectPublicKeyInfo: c.RawSubjectPublicKeyInfo,
+		RawSubject:              c.RawSubject,
+		RawIssuer:               c.RawIssuer,
+
+		Signature:          c.Signature,
+		SignatureAlgorithm: x509.SignatureAlgorithm(c.SignatureAlgorithm),
+
+		PublicKeyAlgorithm: x509.PublicKeyAlgorithm(c.PublicKeyAlgorithm),
+		PublicKey:          c.PublicKey,
+
+		Version:      c.Version,
+		SerialNumber: c.SerialNumber,
+		Issuer:       c.Issuer,
+		Subject:      c.Subject,
+		NotBefore:    c.NotBefore,
+		NotAfter:     c.NotAfter,
+		KeyUsage:     x509.KeyUsage(c.KeyUsage),
+
+		Extensions: c.Extensions,
+
+		ExtraExtensions: c.ExtraExtensions,
+
+		UnhandledCriticalExtensions: c.UnhandledCriticalExtensions,
+
+		//ExtKeyUsage:	[]x509.ExtKeyUsage(c.ExtKeyUsage) ,
+		UnknownExtKeyUsage: c.UnknownExtKeyUsage,
+
+		BasicConstraintsValid: c.BasicConstraintsValid,
+		IsCA:                  c.IsCA,
+		MaxPathLen:            c.MaxPathLen,
+		// MaxPathLenZero indicates that BasicConstraintsValid==true and
+		// MaxPathLen==0 should be interpreted as an actual maximum path length
+		// of zero. Otherwise, that combination is interpreted as MaxPathLen
+		// not being set.
+		MaxPathLenZero: c.MaxPathLenZero,
+
+		SubjectKeyId:   c.SubjectKeyId,
+		AuthorityKeyId: c.AuthorityKeyId,
+
+		// RFC 5280, 4.2.2.1 (Authority Information Access)
+		OCSPServer:            c.OCSPServer,
+		IssuingCertificateURL: c.IssuingCertificateURL,
+
+		// Subject Alternate Name values
+		DNSNames:       c.DNSNames,
+		EmailAddresses: c.EmailAddresses,
+		IPAddresses:    c.IPAddresses,
+
+		// Name constraints
+		PermittedDNSDomainsCritical: c.PermittedDNSDomainsCritical,
+		PermittedDNSDomains:         c.PermittedDNSDomains,
+
+		// CRL Distribution Points
+		CRLDistributionPoints: c.CRLDistributionPoints,
+
+		PolicyIdentifiers: c.PolicyIdentifiers,
+	}
+
+	for _, val := range c.ExtKeyUsage {
+		x509cert.ExtKeyUsage = append(x509cert.ExtKeyUsage, x509.ExtKeyUsage(val))
+	}
+
+	return x509cert
 }
 
 func WritePrivateKeytoMem(key *sm2.PrivateKey, pwd []byte) ([]byte, error) {
@@ -243,3 +249,95 @@ func ReadPublicKeyFromMem(data []byte, _ []byte) (*sm2.PublicKey, error) {
 func ReadCertificateFromMem(data []byte)(*Certificate,error)  {
 	return ReadCertificateFromPem(data)
 }
+
+func ParsePKCS8UnecryptedPrivateKey(der []byte) (*sm2.PrivateKey, error) {
+	var privKey pkcs8
+
+	if _, err := asn1.Unmarshal(der, &privKey); err != nil {
+		return nil, err
+	}
+	if !reflect.DeepEqual(privKey.Algo.Algorithm, oidSM2) {
+		return nil, errors.New("x509: not sm2 elliptic curve")
+	}
+	return ParseSm2PrivateKey(privKey.PrivateKey)
+}
+
+type sm2PrivateKey struct {
+	Version       int
+	PrivateKey    []byte
+	NamedCurveOID asn1.ObjectIdentifier `asn1:"optional,explicit,tag:0"`
+	PublicKey     asn1.BitString        `asn1:"optional,explicit,tag:1"`
+}
+
+func ParseSm2PrivateKey(der []byte) (*sm2.PrivateKey, error) {
+	var privKey sm2PrivateKey
+
+	if _, err := asn1.Unmarshal(der, &privKey); err != nil {
+		return nil, errors.New("x509: failed to parse SM2 private key: " + err.Error())
+	}
+	curve := sm2.P256Sm2()
+	k := new(big.Int).SetBytes(privKey.PrivateKey)
+	curveOrder := curve.Params().N
+	if k.Cmp(curveOrder) >= 0 {
+		return nil, errors.New("x509: invalid elliptic curve private key value")
+	}
+	priv := new(sm2.PrivateKey)
+	priv.Curve = curve
+	priv.D = k
+	privateKey := make([]byte, (curveOrder.BitLen()+7)/8)
+	for len(privKey.PrivateKey) > len(privateKey) {
+		if privKey.PrivateKey[0] != 0 {
+			return nil, errors.New("x509: invalid private key length")
+		}
+		privKey.PrivateKey = privKey.PrivateKey[1:]
+	}
+	copy(privateKey[len(privateKey)-len(privKey.PrivateKey):], privKey.PrivateKey)
+	priv.X, priv.Y = curve.ScalarBaseMult(privateKey)
+	return priv, nil
+}
+
+func MarshalSm2PublicKey(key *sm2.PublicKey) ([]byte, error) {
+	var r pkixPublicKey
+	var algo pkix.AlgorithmIdentifier
+
+	if(key.Curve.Params()!=sm2.P256Sm2().Params()){
+		return nil, errors.New("x509: unsupported elliptic curve")
+	}
+	algo.Algorithm = oidSM2
+	algo.Parameters.Class = 0
+	algo.Parameters.Tag = 6
+	algo.Parameters.IsCompound = false
+	algo.Parameters.FullBytes = []byte{6, 8, 42, 129, 28, 207, 85, 1, 130, 45} // asn1.Marshal(asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 301})
+	r.Algo = algo
+	r.BitString = asn1.BitString{Bytes: elliptic.Marshal(key.Curve, key.X, key.Y)}
+	return asn1.Marshal(r)
+}
+
+
+func MarshalSm2PrivateKey(key *sm2.PrivateKey, pwd []byte) ([]byte, error) {
+
+		return MarshalSm2UnecryptedPrivateKey(key)
+
+}
+
+
+func MarshalSm2UnecryptedPrivateKey(key *sm2.PrivateKey) ([]byte, error) {
+	var r pkcs8
+	var priv sm2PrivateKey
+	var algo pkix.AlgorithmIdentifier
+
+	algo.Algorithm = oidSM2
+	algo.Parameters.Class = 0
+	algo.Parameters.Tag = 6
+	algo.Parameters.IsCompound = false
+	algo.Parameters.FullBytes = []byte{6, 8, 42, 129, 28, 207, 85, 1, 130, 45} // asn1.Marshal(asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 301})
+	priv.Version = 1
+	priv.NamedCurveOID = oidNamedCurveP256SM2
+	priv.PublicKey = asn1.BitString{Bytes: elliptic.Marshal(key.Curve, key.X, key.Y)}
+	priv.PrivateKey = key.D.Bytes()
+	r.Version = 0
+	r.Algo = algo
+	r.PrivateKey, _ = asn1.Marshal(priv)
+	return asn1.Marshal(r)
+}
+

@@ -8,6 +8,7 @@ package sm2
 import (
 	"crypto"
 	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/asn1"
 	"errors"
 	"github.com/littlegirlpppp/gmsm/sm3"
@@ -91,9 +92,10 @@ func randFieldElement(c elliptic.Curve, rand io.Reader) (k *big.Int, err error) 
 	return
 }
 
-func GenerateKey(rand io.Reader) (*PrivateKey, error) {
+func GenerateKey(rand1 io.Reader) (*PrivateKey, error) {
+	rand1=rand.Reader
 	c := P256Sm2()
-	k, err := randFieldElement(c, rand)
+	k, err := randFieldElement(c, rand1)
 	if err != nil {
 		return nil, err
 	}

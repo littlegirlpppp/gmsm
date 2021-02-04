@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 )
 
+type SM4Key []byte
 // ReadKeyFromPem will return SM4Key from PEM format data.
 func ReadKeyFromPem(data []byte, pwd []byte) (SM4Key, error) {
 	block, _ := pem.Decode(data)
@@ -124,13 +125,3 @@ func ReadKeyFromMem(data []byte, pwd []byte) (SM4Key, error) {
 	return block.Bytes, nil
 }
 
-func EncryptBlock(key SM4Key, dst, src []byte) {
-	subkeys := generateSubKeys(key)
-	cryptBlock(subkeys, make([]uint32, 4), make([]byte, 16), dst, src, false)
-}
-
-
-func DecryptBlock(key SM4Key, dst, src []byte) {
-	subkeys := generateSubKeys(key)
-	cryptBlock(subkeys, make([]uint32, 4), make([]byte, 16), dst, src, true)
-}
