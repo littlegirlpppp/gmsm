@@ -223,7 +223,7 @@ func maybeReduceModP(in *big.Int) *big.Int {
 //CombinedMult returns baseScalar*G+scalar*P, where G is the base point of the group
 //and P is the point (base or non-base point) of the group,
 //baseScalar and scalar are integers in big-endian form.
-func (curve p256Curve) CombinedMult(bigX, bigY *big.Int, baseScalar, scalar []byte) (x, y *big.Int) {
+func (curve p256Curve) CombinedMult(Precomputed *PCom, baseScalar, scalar []byte) (x, y *big.Int) {
 	scalarReversed := make([]uint64, 4)
 	var r1, r2 p256Point
 	p256GetScalar(scalarReversed, baseScalar)
@@ -232,26 +232,26 @@ func (curve p256Curve) CombinedMult(bigX, bigY *big.Int, baseScalar, scalar []by
 
 	p256GetScalar(scalarReversed, scalar)
 	r2IsInfinity := scalarIsZero(scalarReversed)
-	fromBig(r2.xyz[0:4], maybeReduceModP(bigX))
-	fromBig(r2.xyz[4:8], maybeReduceModP(bigY))
-	p256Mul(r2.xyz[0:4], r2.xyz[0:4], rr[:])
-	p256Mul(r2.xyz[4:8], r2.xyz[4:8], rr[:])
+	//fromBig(r2.xyz[0:4], maybeReduceModP(bigX))
+	//fromBig(r2.xyz[4:8], maybeReduceModP(bigY))
+	//p256Mul(r2.xyz[0:4], r2.xyz[0:4], rr[:])
+	//p256Mul(r2.xyz[4:8], r2.xyz[4:8], rr[:])
 
 	// This sets r2's Z value to 1, in the Montgomery domain.
 //	r2.xyz[8] = 0x0000000000000001
 //	r2.xyz[9] = 0xffffffff00000000
 //	r2.xyz[10] = 0xffffffffffffffff
 //	r2.xyz[11] = 0x00000000fffffffe
-	r2.xyz[8] = 0x0000000000000001
-	r2.xyz[9] = 0x00000000FFFFFFFF
-	r2.xyz[10] = 0x0000000000000000
-	r2.xyz[11] = 0x0000000100000000
+//	r2.xyz[8] = 0x0000000000000001
+//	r2.xyz[9] = 0x00000000FFFFFFFF
+//	r2.xyz[10] = 0x0000000000000000
+//	r2.xyz[11] = 0x0000000100000000
 
 	//r2.p256ScalarMult(scalarReversed)
 	//p256PointAddAsm(r1.xyz[:], r1.xyz[:], r2.xyz[:])
 
-	r2.p256ScalarMult(scalarReversed)
-
+	//r2.p256ScalarMult(scalarReversed)
+	r2.p256PreMult(Precomputed,scalarReversed)
 	var sum, double p256Point
 	pointsEqual := p256PointAddAsm(sum.xyz[:], r1.xyz[:], r2.xyz[:])
 	p256PointDoubleAsm(double.xyz[:], r1.xyz[:])
@@ -261,6 +261,57 @@ func (curve p256Curve) CombinedMult(bigX, bigY *big.Int, baseScalar, scalar []by
 	return sum.p256PointToAffine()
 }
 
+func (curve p256Curve) PreScalarMult(Precomputed *PCom, scalar []byte) (x,y *big.Int) {
+	scalarReversed := make([]uint64, 4)
+	p256GetScalar(scalarReversed, scalar)
+
+	r := new(p256Point)
+	r.p256PreMult(Precomputed,scalarReversed)
+	x,y = r.p256PointToAffine()
+	return
+}
+//fast sm2p256Mult with public key table
+func (p *p256Point) p256PreMult(Precomputed *PCom, scalar []uint64) {
+	wvalue := (scalar[0] << 1) & 0xff
+	sel, sign := boothW7(uint(wvalue))
+	sm2p256SelectBase(p.xyz[0:8], Precomputed[0][0:], sel)
+	sm2p256NegCond(p.xyz[4:8], sign)
+
+	// (This is one, in the Montgomery domain.)
+	//p.xyz[8] = 0x0000000000000001
+	//p.xyz[9] = 0xffffffff00000000
+	//p.xyz[10] = 0xffffffffffffffff
+	//p.xyz[11] = 0x00000000fffffffe
+	p.xyz[8] = 0x0000000000000001
+	p.xyz[9] = 0x00000000FFFFFFFF
+	p.xyz[10] = 0x0000000000000000
+	p.xyz[11] = 0x0000000100000000
+	var t0 p256Point
+	// (This is one, in the Montgomery domain.)
+	//t0.xyz[8] = 0x0000000000000001
+	//t0.xyz[9] = 0xffffffff00000000
+	//t0.xyz[10] = 0xffffffffffffffff
+	//t0.xyz[11] = 0x00000000fffffffe
+	t0.xyz[8] = 0x0000000000000001
+	t0.xyz[9] = 0x00000000FFFFFFFF
+	t0.xyz[10] = 0x0000000000000000
+	t0.xyz[11] = 0x0000000100000000
+	index := uint(6)
+	zero := sel
+
+	for i := 1; i < 37; i++ {
+		if index < 192 {
+			wvalue = ((scalar[index/64] >> (index % 64)) + (scalar[index/64+1] << (64 - (index % 64)))) & 0xff
+		} else {
+			wvalue = (scalar[index/64] >> (index % 64)) & 0xff
+		}
+		index += 7
+		sel, sign = boothW7(uint(wvalue))
+		sm2p256SelectBase(t0.xyz[0:8], Precomputed[i][0:], sel)
+		sm2p256PointAddAffineAsm(p.xyz[0:12], p.xyz[0:12], t0.xyz[0:8], sign, sel, zero)
+		zero |= sel
+	}
+}
 func (curve p256Curve) ScalarBaseMult(scalar []byte) (x, y *big.Int) {
 	scalarReversed := make([]uint64, 4)
 	p256GetScalar(scalarReversed, scalar)

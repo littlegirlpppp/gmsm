@@ -11,19 +11,29 @@ import (
 	"crypto/rand"
 	"encoding/asn1"
 	"errors"
+	lru "github.com/hashicorp/golang-lru"
 	"github.com/littlegirlpppp/gmsm/sm3"
+	"github.com/status-im/keycard-go/hexutils"
 	"io"
 	"math/big"
 )
 
+var PreComputedCached *lru.Cache
+type PCom [37][64 * 8]uint64 // 18944 = 18.5k
+func init() {
+	PreComputedCached, _ = lru.New(len(PCom{})*1024) // 18.50MB
+}
+
 type PublicKey struct {
 	elliptic.Curve
 	X, Y *big.Int
+	PreComputed *PCom //preComputation
 }
 
 type PrivateKey struct {
 	PublicKey
 	D *big.Int
+	DInv *big.Int //(1+d)^-1
 }
 
 type sm2Signature struct {
@@ -33,8 +43,13 @@ type sm2Signature struct {
 var generateRandK  = _generateRandK
 
 // combinedMult implements fast multiplication S1*g + S2*p (g - generator, p - arbitrary point)
-type combinedMult interface {
-	CombinedMult(bigX, bigY *big.Int, baseScalar, scalar []byte) (x, y *big.Int)
+type optMethod interface {
+	// CombinedMult implements fast multiplication S1*g + S2*p (g - generator, p - arbitrary point)
+	CombinedMult(Precomputed *PCom, baseScalar, scalar []byte) (x, y *big.Int)
+	// InitPubKeyTable implements precomputed table of public key
+	//InitPubKeyTable(x, y *big.Int) (Precomputed *[37][64 * 8]uint64)
+	// PreScalarMult implements fast multiplication of public key
+	PreScalarMult(Precomputed *PCom, scalar []byte) (x, y *big.Int)
 }
 
 // The SM2's private key contains the public key
@@ -103,6 +118,15 @@ func GenerateKey(rand1 io.Reader) (*PrivateKey, error) {
 	priv.PublicKey.Curve = c
 	priv.D = k
 	priv.PublicKey.X, priv.PublicKey.Y = c.ScalarBaseMult(k.Bytes())
+	priv.DInv = new(big.Int).Add(k, one)
+	priv.DInv.ModInverse(priv.DInv, c.Params().N)
+	// 如果对象c实现了optMethod则执行InitPubKeyTable方法
+	if _, ok := c.(optMethod); ok {
+		//fmt.Printf("GenerateKey opt.InitPubKeyTable====X:%x, Y:%x\n", priv.PublicKey.X, priv.PublicKey.Y)
+		priv.PreComputed = InitPubKeyTable(priv.PublicKey.X, priv.PublicKey.Y)
+		key := hexutils.BytesToHex(append(priv.PublicKey.X.Bytes(), priv.PublicKey.Y.Bytes()...))
+		PreComputedCached.Add(key, priv.PreComputed)
+	}
 	return priv, nil
 }
 
@@ -193,9 +217,13 @@ func Sign(rand io.Reader, priv *PrivateKey, msg []byte) (r, s *big.Int, err erro
 	s1.Sub(k, s1)
 	s1.Mod(s1, n)
 
-	s2 := new(big.Int).Add(one, priv.D)
-	s2.Mod(s2, n)
-	s2.ModInverse(s2, n)
+	s2 := new(big.Int)
+	if priv.DInv == nil {
+		s2 = s2.Add(one, priv.D)
+		s2.ModInverse(s2, n)
+	} else {
+		s2 = priv.DInv
+	}
 	s = new(big.Int).Mul(s1, s2)
 	s.Mod(s, n)
 
@@ -253,9 +281,28 @@ func VerifyById(pub *PublicKey, msg,id []byte, r, s *big.Int) bool {
 	e := new(big.Int).SetBytes(sm3.SumSM3(m))
 
 	t := new(big.Int).Add(r, s)
-	x11, y11 := pub.Curve.ScalarMult(pub.X, pub.Y, t.Bytes())
-	x12, y12 := pub.Curve.ScalarBaseMult(s.Bytes())
-	x1, _ := pub.Curve.Add(x11, y11, x12, y12)
+
+	// Check if implements S1*g + S2*p
+	//Using fast multiplication CombinedMult.
+	var x1 *big.Int
+	key := hexutils.BytesToHex(append(pub.X.Bytes(), pub.Y.Bytes()...))
+	opt, _ := c.(optMethod)
+	if pub.PreComputed != nil {
+		x1, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
+	} else {
+		// 由于交易的公钥是临时恢复的,所以验签会直接执行以下流程
+		if val, ok := PreComputedCached.Get(key); ok {
+			pub.PreComputed = val.(*PCom)
+			x1, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
+		} else {
+			pub.PreComputed = InitPubKeyTable(pub.X, pub.Y)
+			// 缓存计算过程
+			PreComputedCached.Add(key, pub.PreComputed)
+			x1, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
+		}
+	}
+
+
 	x := new(big.Int).Add(e, x1)
 	x = x.Mod(x, n)
 
@@ -288,12 +335,21 @@ func Verify(pub *PublicKey, msg []byte, r, s *big.Int) bool {
 	// Check if implements S1*g + S2*p
 	//Using fast multiplication CombinedMult.
 	var x1 *big.Int
-	if opt,ok := c.(combinedMult);ok {
-		x1,_ = opt.CombinedMult(pub.X, pub.Y,s.Bytes(),t.Bytes())
+	key := hexutils.BytesToHex(append(pub.X.Bytes(), pub.Y.Bytes()...))
+	opt, _ := c.(optMethod)
+	if pub.PreComputed != nil {
+		x1, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
 	} else {
-		x11, y11 := c.ScalarMult(pub.X, pub.Y, t.Bytes())
-		x12, y12 := c.ScalarBaseMult(s.Bytes())
-		x1, _ = c.Add(x11, y11, x12, y12)
+		// 由于交易的公钥是临时恢复的,所以验签会直接执行以下流程
+		if val, ok := PreComputedCached.Get(key); ok {
+			pub.PreComputed = val.(*PCom)
+			x1, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
+		} else {
+			pub.PreComputed = InitPubKeyTable(pub.X, pub.Y)
+			// 缓存计算过程
+			PreComputedCached.Add(key, pub.PreComputed)
+			x1, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
+		}
 	}
 
 	x := new(big.Int).Add(e, x1)
@@ -320,14 +376,26 @@ func VerifyWithDigest(pub *PublicKey, digest []byte, r, s *big.Int) bool  {
 	t := new(big.Int).Add(r, s)
 	// Check if implements S1*g + S2*p
 	//Using fast multiplication CombinedMult.
+	// Check if implements S1*g + S2*p
+	//Using fast multiplication CombinedMult.
 	var x1 *big.Int
-	if opt, ok := c.(combinedMult); ok {
-		x1, _ = opt.CombinedMult(pub.X, pub.Y, s.Bytes(), t.Bytes())
+	key := hexutils.BytesToHex(append(pub.X.Bytes(), pub.Y.Bytes()...))
+	opt, _ := c.(optMethod)
+	if pub.PreComputed != nil {
+		x1, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
 	} else {
-		x11, y11 := c.ScalarMult(pub.X, pub.Y, t.Bytes())
-		x12, y12 := c.ScalarBaseMult(s.Bytes())
-		x1, _ = c.Add(x11, y11, x12, y12)
+		// 由于交易的公钥是临时恢复的,所以验签会直接执行以下流程
+		if val, ok := PreComputedCached.Get(key); ok {
+			pub.PreComputed = val.(*PCom)
+			x1, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
+		} else {
+			pub.PreComputed = InitPubKeyTable(pub.X, pub.Y)
+			// 缓存计算过程
+			PreComputedCached.Add(key, pub.PreComputed)
+			x1, _ = opt.CombinedMult(pub.PreComputed, s.Bytes(), t.Bytes())
+		}
 	}
+
 	x := new(big.Int).Add(e, x1)
 	x = x.Mod(x, n)
 
