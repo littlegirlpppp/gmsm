@@ -119,7 +119,7 @@ regen:
 }
 
 func (key *PrivateKey) Decrypt(rand io.Reader, msg []byte, opts crypto.DecrypterOpts) (plaintext []byte, err error) {
-	return Decrypt(msg, key)
+	return Decrypt( key,msg)
 }
 
 func pointFromBytes(buf []byte) (x, y *big.Int) {
@@ -133,7 +133,7 @@ func pointFromBytes(buf []byte) (x, y *big.Int) {
 	return
 }
 
-func Decrypt(c []byte, key *PrivateKey) ([]byte, error) {
+func Decrypt(key *PrivateKey,c []byte) ([]byte, error) {
 	sm2enc := new(EncData)
 	_, err := asn1.Unmarshal(c, sm2enc)
 	if err != nil {
