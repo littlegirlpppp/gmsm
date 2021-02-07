@@ -25,24 +25,24 @@ func ReadPrivateKeyFromPem(privateKeyPem []byte, pwd []byte) (*sm2.PrivateKey, e
 }
 
 func WritePrivateKeyToPem(key *sm2.PrivateKey, pwd []byte) ([]byte, error) {
-	//var block *pem.Block
-	//der, err := MarshalSm2PrivateKey(key, pwd) //Convert private key to DER format
-	//if err != nil {
-	//	return nil, err
-	//}
-	//if pwd != nil {
-	//	block = &pem.Block{
-	//		Type:  "ENCRYPTED PRIVATE KEY",
-	//		Bytes: der,
-	//	}
-	//} else {
-	//	block = &pem.Block{
-	//		Type:  "PRIVATE KEY",
-	//		Bytes: der,
-	//	}
-	//}
-	//certPem := pem.EncodeToMemory(block)
-	return nil, nil
+	var block *pem.Block
+	der, err := MarshalSm2PrivateKey(key, pwd) //Convert private key to DER format
+	if err != nil {
+		return nil, err
+	}
+	if pwd != nil {
+		block = &pem.Block{
+			Type:  "ENCRYPTED PRIVATE KEY",
+			Bytes: der,
+		}
+	} else {
+		block = &pem.Block{
+			Type:  "PRIVATE KEY",
+			Bytes: der,
+		}
+	}
+	certPem := pem.EncodeToMemory(block)
+	return certPem, nil
 }
 var (
 	oidPBES1  = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 5, 3}  // pbeWithMD5AndDES-CBC(PBES1)
@@ -67,6 +67,8 @@ func ReadPublicKeyFromPem(publicKeyPem []byte) (*sm2.PublicKey, error) {
 	}
 	return ParseSm2PublicKey(block.Bytes)
 }
+
+
 func ParseSm2PublicKey(der []byte) (*sm2.PublicKey, error) {
 	var pubkey pkixPublicKey
 
@@ -85,17 +87,19 @@ func ParseSm2PublicKey(der []byte) (*sm2.PublicKey, error) {
 	}
 	return &pub, nil
 }
+
+
 func WritePublicKeyToPem(key *sm2.PublicKey) ([]byte, error) {
-	//der, err := MarshalSm2PublicKey(key) //Convert publick key to DER format
-	//if err != nil {
-	//	return nil, err
-	//}
-	//block := &pem.Block{
-	//	Type:  "PUBLIC KEY",
-	//	Bytes: der,
-	//}
-	//certPem := pem.EncodeToMemory(block)
-	return nil, nil
+	der, err := MarshalSm2PublicKey(key) //Convert publick key to DER format
+	if err != nil {
+		return nil, err
+	}
+	block := &pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: der,
+	}
+	certPem := pem.EncodeToMemory(block)
+	return certPem, nil
 }
 
 func ReadCertificateRequestFromPem(certPem []byte) (*CertificateRequest, error) {
@@ -132,16 +136,16 @@ func ReadCertificateFromPem(certPem []byte) (*Certificate, error) {
 // encodes it to PEM format. It uses CreateCertificate to create certificate
 // and returns its PEM format.
 func CreateCertificateToPem(template, parent *Certificate, pubKey *sm2.PublicKey, signer crypto.Signer) ([]byte, error) {
-	//der, err := CreateCertificate(template, parent, pubKey, signer)
-	//if err != nil {
-	//	return nil, err
-	//}
-	//block := &pem.Block{
-	//	Type:  "CERTIFICATE",
-	//	Bytes: der,
-	//}
-	//certPem := pem.EncodeToMemory(block)
-	return nil, nil
+	der, err := CreateCertificate( rand.Reader,template, parent, pubKey, signer)
+	if err != nil {
+		return nil, err
+	}
+	block := &pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: der,
+	}
+	certPem := pem.EncodeToMemory(block)
+	return certPem, nil
 }
 
 // todo 新增加的适配用
@@ -313,13 +317,9 @@ func MarshalSm2PublicKey(key *sm2.PublicKey) ([]byte, error) {
 	return asn1.Marshal(r)
 }
 
-
 func MarshalSm2PrivateKey(key *sm2.PrivateKey, pwd []byte) ([]byte, error) {
-
-		return MarshalSm2UnecryptedPrivateKey(key)
-
+	return MarshalSm2UnecryptedPrivateKey(key)
 }
-
 
 func MarshalSm2UnecryptedPrivateKey(key *sm2.PrivateKey) ([]byte, error) {
 	var r pkcs8
