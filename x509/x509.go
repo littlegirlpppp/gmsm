@@ -2326,13 +2326,13 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 
 
 	var signature []byte
-	switch key.(type) {
-	case *sm2.PrivateKey:
+	switch key.Public().(type) {
+	case *sm2.PublicKey:
 		signature, err = key.Sign(rand, tbsCSRContents, hashFunc)
 		if err != nil {
 			return
 		}
-	default:
+	case *ecdsa.PublicKey:
 		h := hashFunc.New()
 		h.Write(tbsCSRContents)
 		digest := h.Sum(nil)
@@ -2340,6 +2340,8 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 		if err != nil {
 			return
 		}
+	default:
+		err = errors.New("unsupport algorithm")
 	}
 
 
