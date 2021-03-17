@@ -85,7 +85,7 @@ func WriteKeyToPemFile(FileName string, key SM4Key, pwd []byte) error {
 	return nil
 }
 
-// todo 新增加的
+// todo 新增加的eee
 func WriteKeytoMem(key SM4Key, pwd []byte) ([]byte, error) {
 	if pwd != nil {
 		block, err := x509.EncryptPEMBlock(rand.Reader,
